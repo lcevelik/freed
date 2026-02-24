@@ -922,9 +922,9 @@ class FreeDReaderGUI:
         self.lbl_y.config(text=f'{y_m:+7.3f} m  [{data["position"]["y"]}]')
         self.lbl_z.config(text=f'{z_m:+7.3f} m  [{data["position"]["z"]}]')
 
-        # Lens
-        focal_length   = r.interpolate_zoom(data['zoom'])
-        focus_distance = r.interpolate_focus(data['focus'])
+        # Lens — FreeD standard: raw / 1000 = mm (zoom) and m (focus)
+        focal_length   = data['zoom']  / 1000.0
+        focus_distance = data['focus'] / 1000.0
         total_inches   = focus_distance * 39.3701
         feet           = int(total_inches // 12)
         frac_in        = total_inches % 12
