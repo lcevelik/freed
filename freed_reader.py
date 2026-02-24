@@ -12,6 +12,7 @@ __version__   = 'v0.9'
 __author__    = 'Libor Cevelik'
 __copyright__ = 'Copyright (c) 2026 Libor Cevelik'
 
+import os
 import socket
 import struct
 import sys
@@ -34,14 +35,20 @@ else:                            # Linux / other
     _FONT_MONO = 'DejaVu Sans Mono'
     _FONT_SANS = 'DejaVu Sans'
 
-# Configure UTF-8 encoding for Windows console
+# Configure UTF-8 encoding for Windows console.
+# In --noconsole (windowed) mode stdout/stderr are None; redirect to devnull
+# so that any print() call anywhere in the code never raises an AttributeError
+# and silently kills a background thread.
 if sys.platform == 'win32':
     try:
         import io
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
         sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
     except (AttributeError, TypeError):
-        pass  # No console in windowed mode — stdout is None
+        # Windowed mode — no console attached; write to devnull instead of None
+        _devnull = open(os.devnull, 'w')
+        sys.stdout = _devnull
+        sys.stderr = _devnull
 
 
 class FreeDParser:
@@ -157,6 +164,7 @@ class FreeDReceiver:
         self.parser = FreeDParser(debug=debug, ignore_checksum=ignore_checksum)
         self.running = False
         self.debug = debug
+        self._last_error = None   # set if receive_loop exits due to an exception
         self.step_by_step = step_by_step
         self.delay = delay
         self.ignore_checksum = ignore_checksum
@@ -342,6 +350,7 @@ class FreeDReceiver:
             print("\n\nShutting down...")
             self.stop()
         except Exception as e:
+            self._last_error = str(e)
             print(f"Error in receive loop: {e}")
             self.stop()
 
@@ -894,6 +903,13 @@ class FreeDReaderGUI:
     def _update(self):
         if self.receiver is None:
             return
+
+        # Thread health — if the receive thread has died, surface the error
+        if self.recv_thread is not None and not self.recv_thread.is_alive():
+            err = self.receiver._last_error or 'unknown error'
+            self.lbl_status.config(text=f'● RX DEAD: {err[:40]}', fg=self.RED)
+            return
+
         data = self.receiver.latest_data
         addr = self.receiver.latest_addr
 
