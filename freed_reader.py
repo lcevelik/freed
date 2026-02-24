@@ -897,7 +897,14 @@ class FreeDReaderGUI:
     # ------------------------------------------------------------------
 
     def _schedule_update(self):
-        self._update()
+        try:
+            self._update()
+        except Exception as e:
+            # Never let _update() crash kill the loop; surface the error instead
+            try:
+                self.lbl_status.config(text=f'● UI ERR: {str(e)[:40]}', fg=self.RED)
+            except Exception:
+                pass
         self.root.after(100, self._schedule_update)
 
     def _update(self):
@@ -938,9 +945,9 @@ class FreeDReaderGUI:
         self.lbl_y.config(text=f'{y_m:+7.3f} m  [{data["position"]["y"]}]')
         self.lbl_z.config(text=f'{z_m:+7.3f} m  [{data["position"]["z"]}]')
 
-        # Lens — FreeD standard: raw / 1000 = mm (zoom) and m (focus)
+        # Lens — direct FreeD values (raw / 1000 per protocol spec)
         focal_length   = data['zoom']  / 1000.0
-        focus_distance = data['focus'] / 1000.0
+        focus_distance = abs(data['focus'] / 1000.0)
         total_inches   = focus_distance * 39.3701
         feet           = int(total_inches // 12)
         frac_in        = total_inches % 12
