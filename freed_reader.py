@@ -921,6 +921,13 @@ class FreeDReaderGUI:
         addr = self.receiver.latest_addr
 
         if data is None:
+            # No packet yet — show that we ARE listening so user knows it's working
+            try:
+                local_ip = socket.gethostbyname(socket.gethostname())
+            except Exception:
+                local_ip = '0.0.0.0'
+            self.lbl_status.config(
+                text=f'● LISTENING  {local_ip}:45000', fg=self.CYAN)
             return
 
         r = self.receiver
