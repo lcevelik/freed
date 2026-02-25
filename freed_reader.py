@@ -514,6 +514,7 @@ class FreeDReceiverGUI(FreeDReceiver):
         self.packet_interval_ms = None   # smoothed ms between packets
         self.packet_fps = None           # smoothed fps
         self._interval_history = deque(maxlen=30)  # rolling window
+        self._gl_phase_history = deque(maxlen=8)   # phase counter cycling → locked
 
     def display_data(self, data: dict, addr: tuple):
         now = time.monotonic()
@@ -522,12 +523,17 @@ class FreeDReceiverGUI(FreeDReceiver):
             # Gap >2s means we just reconnected — reset history so fps is clean
             if interval > 2000.0:
                 self._interval_history.clear()
+                self._gl_phase_history.clear()
             else:
                 self._interval_history.append(interval)
                 avg = sum(self._interval_history) / len(self._interval_history)
                 self.packet_interval_ms = avg
                 self.packet_fps = 1000.0 / avg if avg > 0 else None
         self._last_packet_time = now
+        # Track genlock phase counter (upper nibble of byte 26)
+        rb = data.get('raw_bytes')
+        if rb and len(rb) > 26:
+            self._gl_phase_history.append((rb[26] >> 4) & 0xF)
         self.latest_data = data
         self.latest_addr = addr
 
@@ -741,6 +747,12 @@ class FreeDReaderGUI:
         self.lbl_gl_freq = tk.Label(gl, text='--- Hz', bg=self.PANEL_BG, fg=self.ORANGE,
                                     font=self._fonts['freq'], anchor='w')
         self.lbl_gl_freq.grid(row=3, column=1, sticky='w', padx=(6, 0), pady=(4, 0))
+
+        tk.Label(gl, text='Bytes', bg=self.PANEL_BG, fg=self.DIM,
+                 font=self._fonts['lbl'], width=7, anchor='e').grid(row=4, column=0, sticky='e', pady=(4, 0))
+        self.lbl_gl_raw = tk.Label(gl, text='-- --', bg=self.PANEL_BG, fg=self.DIM,
+                                   font=self._fonts['medr'], anchor='w')
+        self.lbl_gl_raw.grid(row=4, column=1, sticky='w', padx=(6, 0), pady=(4, 0))
 
         # Row 2: STATUS | RAW PACKET
         tc = self._lf(dash, 'STATUS')
@@ -1001,31 +1013,35 @@ class FreeDReaderGUI:
         self.lbl_hex1.config(text=line1)
         self.lbl_hex2.config(text=line2)
 
-        # Genlock status (spare bytes)
+        # Genlock status (spare bytes — Sony Ocellus vendor encoding)
         rb = data['raw_bytes']
-        gl_lower = rb[26] & 0x0F        # lower nibble — lock flags
-        gl_phase = (rb[26] >> 4) & 0xF  # upper nibble — frame phase counter
-        gl_ref   = rb[27]               # reference format code
+        gl_byte26 = rb[26]
+        gl_byte27 = rb[27]
+        gl_phase  = (gl_byte26 >> 4) & 0xF   # upper nibble — frame phase counter
         if is_stale:
             self.lbl_gl_status.config(text='● NO SIGNAL', fg=self.RED)
             self.lbl_gl_phase.config(text='---')
             self.lbl_gl_freq.config(text='--- Hz')
+            self.lbl_gl_raw.config(text='-- --')
         else:
-            is_locked = bool(gl_lower & 0x01)
+            # Phase counter (upper nibble) cycling across packets = locked to ext ref
+            is_locked = len(set(r._gl_phase_history)) > 1
             self.lbl_gl_status.config(
                 text='● LOCKED' if is_locked else '● UNLOCKED',
                 fg=self.GREEN if is_locked else self.RED)
             self.lbl_gl_phase.config(text=f'{gl_phase:X}h  ({gl_phase}/16)')
             if r.packet_fps is not None:
                 self.lbl_gl_freq.config(text=f'{r.packet_fps:.2f} Hz')
-        self.lbl_gl_ref.config(text=f'0x{gl_ref:02X} (vendor-defined)')
+            self.lbl_gl_raw.config(
+                text=f'0x{gl_byte26:02X} 0x{gl_byte27:02X}  [{gl_byte26:08b}]',
+                fg=self.DIM)
+        self.lbl_gl_ref.config(text=f'0x{gl_byte27:02X} (vendor-defined)')
 
         # Packet Map tab — update every row with live data
         if hasattr(self, 'packet_tree'):
             rb = data['raw_bytes']
-            gl_lower_pm = rb[26] & 0x0F
             gl_phase_pm = (rb[26] >> 4) & 0xF
-            lock_str    = 'LOCKED' if (gl_lower_pm & 0x01) else 'UNLOCKED'
+            lock_str    = 'LOCKED' if len(set(r._gl_phase_history)) > 1 else 'UNLOCKED'
             map_rows = [
                 (f'{rb[0]:02X}',
                  'Msg Type', str(rb[0]),
