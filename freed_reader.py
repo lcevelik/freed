@@ -943,11 +943,16 @@ class FreeDReaderGUI:
         if data is None:
             # No packet yet — show that we ARE listening so user knows it's working
             try:
-                local_ip = socket.gethostbyname(socket.gethostname())
+                all_ips = sorted({
+                    info[4][0]
+                    for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+                    if not info[4][0].startswith('127.')
+                })
+                ip_str = '  /  '.join(all_ips) if all_ips else '0.0.0.0'
             except Exception:
-                local_ip = '0.0.0.0'
+                ip_str = '0.0.0.0'
             self.lbl_status.config(
-                text=f'● LISTENING  {local_ip}:45000', fg=self.CYAN)
+                text=f'● LISTENING :45000  [{ip_str}]', fg=self.CYAN)
             return
 
         r = self.receiver
@@ -973,14 +978,22 @@ class FreeDReaderGUI:
         self.lbl_z.config(text=f'{z_m:+7.3f} m  [{data["position"]["z"]}]')
 
         # Lens — direct FreeD values (raw / 1000 per protocol spec)
-        focal_length   = data['zoom']  / 1000.0
-        focus_distance = abs(data['focus'] / 1000.0)
-        total_inches   = focus_distance * 39.3701
+        # raw == 0 means no lens data is being transmitted — show dashes
+        focal_length   = data['zoom']  / 1000.0 if data['zoom']  != 0 else None
+        # 0 = no data (zoom-style), 65535 = 0xFFFF = no data (focus encoder sentinel)
+        focus_distance = abs(data['focus'] / 1000.0) if data['focus'] not in (0, 65535) else None
+        total_inches   = focus_distance * 39.3701 if focus_distance is not None else 0.0
         feet           = int(total_inches // 12)
         frac_in        = total_inches % 12
         lens_color = self.DIM if is_stale else self.YELLOW
-        self.lbl_zoom.config( text=f'{focal_length:.1f} mm  [{data["zoom"]}]',  fg=lens_color)
-        self.lbl_focus.config(text=f'{focus_distance:.2f}m  {feet}ft {frac_in:.1f}in  [{data["focus"]}]', fg=lens_color)
+        if focal_length is None:
+            self.lbl_zoom.config(text=f'---  [{data["zoom"]}]', fg=self.DIM)
+        else:
+            self.lbl_zoom.config(text=f'{focal_length:.1f} mm  [{data["zoom"]}]', fg=lens_color)
+        if focus_distance is None:
+            self.lbl_focus.config(text=f'---  [{data["focus"]}]', fg=self.DIM)
+        else:
+            self.lbl_focus.config(text=f'{focus_distance:.2f}m  {feet}ft {frac_in:.1f}in  [{data["focus"]}]', fg=lens_color)
 
         # Timecode
         tc = r.parse_timecode(data['spare'], 24.0)
@@ -1069,10 +1082,10 @@ class FreeDReaderGUI:
                  f'{z_m:+.3f} m'),
                 (' '.join(f'{b:02X}' for b in rb[20:23]),
                  'Zoom', str(data['zoom']),
-                 f'{focal_length:.1f} mm'),
+                 f'{focal_length:.1f} mm' if focal_length is not None else '---'),
                 (' '.join(f'{b:02X}' for b in rb[23:26]),
                  'Focus', str(data['focus']),
-                 f'{focus_distance:.2f}m  {feet}ft {frac_in:.1f}in'),
+                 f'{focus_distance:.2f}m  {feet}ft {frac_in:.1f}in' if focus_distance is not None else '---'),
                 (f'{rb[26]:02X} {rb[27]:02X}',
                  'Spare/GL', f'0x{data["spare"]:04X}',
                  f'{lock_str}  ph={gl_phase_pm:X}h  ref=0x{rb[27]:02X}'),
