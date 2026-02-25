@@ -567,6 +567,7 @@ class FreeDReaderGUI:
     def _build_window(self):
         self.root.title(f'FreeD Dashboard {__version__}')
         self.root.configure(bg=self.BG)
+        self.root.geometry('960x560')   # pin initial size — prevents content growing window
         self.root.resizable(True, True)
         self.root.minsize(640, 500)
         self.root.attributes('-topmost', True)
@@ -605,8 +606,13 @@ class FreeDReaderGUI:
             self._fonts[name].configure(size=max(7, int(round(base * factor))))
 
     def _capture_base_width(self):
-        """Record the window width after initial render as the 100% reference."""
-        self._base_width = self.root.winfo_width()
+        """Record the window width after initial render and pin geometry."""
+        self.root.update_idletasks()
+        w = self.root.winfo_width()
+        h = self.root.winfo_height()
+        self._base_width = w
+        # Re-pin so any layout settling doesn't leave the window unpinned
+        self.root.geometry(f'{w}x{h}')
 
     def _on_resize(self, event):
         """Debounced handler for window <Configure>; triggers font rescale."""
@@ -786,10 +792,12 @@ class FreeDReaderGUI:
         tk.Label(raw, text='Hex', bg=self.PANEL_BG, fg=self.DIM,
                  font=self._fonts['lbl'], width=7, anchor='ne').grid(row=2, column=0, sticky='ne', pady=2)
         self.lbl_hex1 = tk.Label(raw, text='', bg=self.PANEL_BG, fg='#aaaaaa',
-                                  font=self._fonts['hex'], anchor='w', justify='left')
+                                  font=self._fonts['hex'], anchor='w', justify='left',
+                                  width=42)
         self.lbl_hex1.grid(row=2, column=1, sticky='w', padx=(6, 0), pady=(2, 0))
         self.lbl_hex2 = tk.Label(raw, text='', bg=self.PANEL_BG, fg='#aaaaaa',
-                                  font=self._fonts['hex'], anchor='w', justify='left')
+                                  font=self._fonts['hex'], anchor='w', justify='left',
+                                  width=42)
         self.lbl_hex2.grid(row=3, column=1, sticky='w', padx=(6, 0), pady=(0, 2))
 
         tk.Frame(dash, bg=self.BG, height=4).grid(row=3, column=0, columnspan=2)
