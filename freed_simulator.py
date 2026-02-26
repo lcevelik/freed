@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFrame, QLabel,
     QGridLayout, QVBoxLayout, QHBoxLayout, QFormLayout,
     QSlider, QSpinBox, QDoubleSpinBox, QCheckBox, QPushButton,
-    QGroupBox,
+    QGroupBox, QSizePolicy,
 )
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QFont
@@ -501,6 +501,7 @@ class FreeDSimulator(QMainWindow):
     def _build_control_bar(self) -> QFrame:
         frame = QFrame()
         frame.setObjectName('card')
+        frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         lay = QHBoxLayout(frame)
         lay.setContentsMargins(12, 6, 12, 6)
         lay.setSpacing(10)
