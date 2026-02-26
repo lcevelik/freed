@@ -640,7 +640,6 @@ class FreeDDashboard(QMainWindow):
         self.setWindowTitle(f'FreeD Dashboard {__version__}')
         self.resize(980, 620)
         self.setMinimumSize(720, 500)
-        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
         self.setStyleSheet(self._stylesheet())
 
         central = QWidget()
