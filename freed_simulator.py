@@ -186,43 +186,35 @@ class FreeDSimulator(QMainWindow):
             color: {self.FG};
             border: 1px solid {self.BORDER};
             border-radius: 6px;
-            padding: 2px 24px 2px 6px;
+            padding: 2px 30px 2px 8px;
             font-family: '{_FONT_MONO}';
             font-size: 12px;
+            min-height: 26px;
         }}
         QDoubleSpinBox::up-button, QSpinBox::up-button {{
             subcontrol-origin: border;
             subcontrol-position: top right;
-            width: 18px;
-            background: {self.CARD};
+            width: 26px;
+            background: #48484a;
             border-left: 1px solid {self.BORDER};
             border-top-right-radius: 6px;
+            border-bottom: 1px solid {self.BORDER};
         }}
         QDoubleSpinBox::down-button, QSpinBox::down-button {{
             subcontrol-origin: border;
             subcontrol-position: bottom right;
-            width: 18px;
-            background: {self.CARD};
+            width: 26px;
+            background: #48484a;
             border-left: 1px solid {self.BORDER};
             border-bottom-right-radius: 6px;
         }}
         QDoubleSpinBox::up-button:hover, QSpinBox::up-button:hover,
         QDoubleSpinBox::down-button:hover, QSpinBox::down-button:hover {{
-            background: {self.BORDER};
+            background: #636366;
         }}
-        QDoubleSpinBox::up-arrow, QSpinBox::up-arrow {{
-            width: 8px; height: 8px;
-            image: none;
-            border-left: 4px solid transparent;
-            border-right: 4px solid transparent;
-            border-bottom: 5px solid {self.FG};
-        }}
-        QDoubleSpinBox::down-arrow, QSpinBox::down-arrow {{
-            width: 8px; height: 8px;
-            image: none;
-            border-left: 4px solid transparent;
-            border-right: 4px solid transparent;
-            border-top: 5px solid {self.FG};
+        QDoubleSpinBox::up-button:pressed, QSpinBox::up-button:pressed,
+        QDoubleSpinBox::down-button:pressed, QSpinBox::down-button:pressed {{
+            background: {self.CYAN};
         }}
         QCheckBox {{
             spacing: 6px;
@@ -478,13 +470,13 @@ class FreeDSimulator(QMainWindow):
         self._spin_cam_id = QSpinBox()
         self._spin_cam_id.setRange(0, 255)
         self._spin_cam_id.setValue(1)
-        self._spin_cam_id.setFixedWidth(100)
+        self._spin_cam_id.setFixedWidth(110)
 
         self._spin_fps = QSpinBox()
         self._spin_fps.setRange(1, 60)
         self._spin_fps.setValue(25)
         self._spin_fps.setSuffix(' fps')
-        self._spin_fps.setFixedWidth(100)
+        self._spin_fps.setFixedWidth(110)
 
         lbl_cam = QLabel('Camera ID')
         lbl_cam.setObjectName('dim')
