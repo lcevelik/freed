@@ -186,9 +186,43 @@ class FreeDSimulator(QMainWindow):
             color: {self.FG};
             border: 1px solid {self.BORDER};
             border-radius: 6px;
-            padding: 2px 6px;
+            padding: 2px 24px 2px 6px;
             font-family: '{_FONT_MONO}';
             font-size: 12px;
+        }}
+        QDoubleSpinBox::up-button, QSpinBox::up-button {{
+            subcontrol-origin: border;
+            subcontrol-position: top right;
+            width: 18px;
+            background: {self.CARD};
+            border-left: 1px solid {self.BORDER};
+            border-top-right-radius: 6px;
+        }}
+        QDoubleSpinBox::down-button, QSpinBox::down-button {{
+            subcontrol-origin: border;
+            subcontrol-position: bottom right;
+            width: 18px;
+            background: {self.CARD};
+            border-left: 1px solid {self.BORDER};
+            border-bottom-right-radius: 6px;
+        }}
+        QDoubleSpinBox::up-button:hover, QSpinBox::up-button:hover,
+        QDoubleSpinBox::down-button:hover, QSpinBox::down-button:hover {{
+            background: {self.BORDER};
+        }}
+        QDoubleSpinBox::up-arrow, QSpinBox::up-arrow {{
+            width: 8px; height: 8px;
+            image: none;
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
+            border-bottom: 5px solid {self.FG};
+        }}
+        QDoubleSpinBox::down-arrow, QSpinBox::down-arrow {{
+            width: 8px; height: 8px;
+            image: none;
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
+            border-top: 5px solid {self.FG};
         }}
         QCheckBox {{
             spacing: 6px;
@@ -209,8 +243,8 @@ class FreeDSimulator(QMainWindow):
             background-color: {self.CYAN};
             color: #000000;
             border: none;
-            border-radius: 8px;
-            padding: 8px 24px;
+            border-radius: 7px;
+            padding: 5px 18px;
             font-weight: 600;
             font-size: 13px;
         }}
@@ -444,13 +478,13 @@ class FreeDSimulator(QMainWindow):
         self._spin_cam_id = QSpinBox()
         self._spin_cam_id.setRange(0, 255)
         self._spin_cam_id.setValue(1)
-        self._spin_cam_id.setFixedWidth(80)
+        self._spin_cam_id.setFixedWidth(100)
 
         self._spin_fps = QSpinBox()
         self._spin_fps.setRange(1, 60)
         self._spin_fps.setValue(25)
         self._spin_fps.setSuffix(' fps')
-        self._spin_fps.setFixedWidth(80)
+        self._spin_fps.setFixedWidth(100)
 
         lbl_cam = QLabel('Camera ID')
         lbl_cam.setObjectName('dim')
@@ -468,8 +502,8 @@ class FreeDSimulator(QMainWindow):
         frame = QFrame()
         frame.setObjectName('card')
         lay = QHBoxLayout(frame)
-        lay.setContentsMargins(16, 10, 16, 10)
-        lay.setSpacing(12)
+        lay.setContentsMargins(12, 6, 12, 6)
+        lay.setSpacing(10)
 
         self._btn_send_one = QPushButton('Send One Packet')
         self._btn_send_one.clicked.connect(self._send_one)
