@@ -18,9 +18,13 @@ import struct
 import sys
 import threading
 import time
-import tkinter as tk
-import tkinter.ttk as ttk
-import tkinter.font as tkfont
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QFrame, QLabel,
+    QGridLayout, QVBoxLayout, QHBoxLayout, QFormLayout,
+    QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
+)
+from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtGui import QFont, QColor
 from collections import deque
 from datetime import datetime
 
@@ -538,344 +542,387 @@ class FreeDReceiverGUI(FreeDReceiver):
         self.latest_addr = addr
 
 
-class FreeDReaderGUI:
-    """Dark dashboard GUI for FreeD Protocol Reader"""
+class FreeDDashboard(QMainWindow):
+    """Apple-dark PyQt6 dashboard for FreeD Protocol Reader"""
 
-    BG       = '#1a1a2e'
-    PANEL_BG = '#16213e'
-    BORDER   = '#0f3460'
-    DIM      = '#6a6a8a'
-    FG       = '#e0e0e0'
-    GREEN    = '#00ff88'
-    CYAN     = '#00d4ff'
-    YELLOW   = '#ffd700'
-    ORANGE   = '#ff9500'
-    RED      = '#ff4444'
+    BG     = '#1c1c1e'
+    CARD   = '#2c2c2e'
+    BORDER = '#3a3a3c'
+    DIM    = '#8e8e93'
+    FG     = '#f2f2f7'
+    GREEN  = '#30d158'
+    CYAN   = '#32ade6'
+    YELLOW = '#ffd60a'
+    ORANGE = '#ff9f0a'
+    RED    = '#ff453a'
 
-    def __init__(self, root: tk.Tk):
-        self.root = root
+    def __init__(self):
+        super().__init__()
         self.receiver = None
         self.recv_thread = None
-        self._resize_job  = None
-        self._base_width  = None   # set after first render
-        self._in_rescale  = False
-        self._init_fonts()
-        self._build_window()
-        self._build_layout()
+        self._build_ui()
         self._start_receiver()
-        self._schedule_update()
-        self.root.after(200, self._capture_base_width)
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._do_update)
+        self._timer.start(100)
 
     # ------------------------------------------------------------------
-    # Window & Layout
+    # Stylesheet
     # ------------------------------------------------------------------
 
-    def _build_window(self):
-        self.root.title(f'FreeD Dashboard {__version__}')
-        self.root.configure(bg=self.BG)
-        self.root.geometry('960x560')   # pin initial size — prevents content growing window
-        self.root.resizable(True, True)
-        self.root.minsize(640, 500)
-        self.root.attributes('-topmost', True)
-        self.root.protocol('WM_DELETE_WINDOW', self._on_close)
-        self.root.bind('<Configure>', self._on_resize)
+    def _stylesheet(self) -> str:
+        return f"""
+            QMainWindow, QWidget {{
+                background-color: {self.BG};
+                color: {self.FG};
+            }}
+            QFrame#card {{
+                background-color: {self.CARD};
+                border: 1px solid {self.BORDER};
+                border-radius: 12px;
+            }}
+            QFrame#header {{
+                background-color: {self.CARD};
+                border-bottom: 1px solid {self.BORDER};
+            }}
+            QTabWidget::pane {{
+                border: none;
+                background-color: {self.BG};
+            }}
+            QTabBar::tab {{
+                background-color: {self.BG};
+                color: {self.DIM};
+                padding: 8px 20px;
+                border: none;
+                font-size: 13px;
+            }}
+            QTabBar::tab:selected {{
+                color: {self.FG};
+                border-bottom: 2px solid {self.CYAN};
+            }}
+            QTabBar::tab:hover {{
+                color: {self.FG};
+            }}
+            QTableWidget {{
+                background-color: {self.CARD};
+                border: 1px solid {self.BORDER};
+                border-radius: 8px;
+                gridline-color: {self.BORDER};
+                color: {self.FG};
+            }}
+            QHeaderView::section {{
+                background-color: {self.BG};
+                color: {self.DIM};
+                border: none;
+                border-bottom: 1px solid {self.BORDER};
+                padding: 6px 10px;
+                font-size: 11px;
+                font-weight: bold;
+            }}
+            QTableWidget::item {{
+                padding: 4px 8px;
+            }}
+            QScrollBar:vertical {{
+                background: {self.BG};
+                width: 8px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {self.BORDER};
+                border-radius: 4px;
+            }}
+        """
 
-    def _init_fonts(self):
-        """Create tkfont.Font objects — all widgets reference these, so changing
-        size here updates every widget that uses the font automatically."""
-        specs = {
-            'title':  (_FONT_SANS,  12, 'bold'),
-            'cam':    (_FONT_SANS,  10, 'bold'),
-            'hdr':    (_FONT_SANS,   9, 'bold'),
-            'lbl':    (_FONT_SANS,   9, 'normal'),
-            'small':  (_FONT_SANS,   8, 'normal'),
-            'big':    (_FONT_SANS,  12, 'bold'),
-            'val':    (_FONT_MONO,  13, 'bold'),
-            'tc':     (_FONT_MONO,  18, 'bold'),
-            'med':    (_FONT_MONO,  11, 'bold'),
-            'medr':   (_FONT_MONO,  11, 'normal'),
-            'freq':   (_FONT_MONO,  14, 'bold'),
-            'hex':    (_FONT_MONO,   9, 'normal'),
-            'pm':     (_FONT_MONO,  10, 'normal'),
-            'pm_hdr': (_FONT_SANS,   9, 'bold'),
-        }
-        self._fonts = {
-            name: tkfont.Font(family=fam, size=sz, weight=w)
-            for name, (fam, sz, w) in specs.items()
-        }
-        self._font_bases = {name: v[1] for name, v in specs.items()}
+    # ------------------------------------------------------------------
+    # UI Construction
+    # ------------------------------------------------------------------
 
-    def _rescale(self, pct: float):
-        """Scale all fonts to pct% of their base sizes (pct is a plain number, e.g. 130)."""
-        factor = pct / 100.0
-        for name, base in self._font_bases.items():
-            self._fonts[name].configure(size=max(7, int(round(base * factor))))
+    def _build_ui(self):
+        self.setWindowTitle(f'FreeD Dashboard {__version__}')
+        self.resize(980, 620)
+        self.setMinimumSize(720, 500)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+        self.setStyleSheet(self._stylesheet())
 
-    def _capture_base_width(self):
-        """Record the window width after initial render and pin geometry."""
-        self.root.update_idletasks()
-        w = self.root.winfo_width()
-        h = self.root.winfo_height()
-        self._base_width = w
-        # Re-pin so any layout settling doesn't leave the window unpinned
-        self.root.geometry(f'{w}x{h}')
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        main_layout.addWidget(self._build_header())
+        main_layout.addWidget(self._build_tabs())
 
-    def _on_resize(self, event):
-        """Debounced handler for window <Configure>; triggers font rescale."""
-        if event.widget is not self.root or self._in_rescale:
-            return
-        if self._base_width is None:
-            return
-        if self._resize_job:
-            self.root.after_cancel(self._resize_job)
-        self._resize_job = self.root.after(150, self._apply_resize, event.width)
+    def _build_header(self) -> QFrame:
+        hdr = QFrame()
+        hdr.setObjectName('header')
+        hdr.setFixedHeight(46)
+        layout = QHBoxLayout(hdr)
+        layout.setContentsMargins(16, 0, 16, 0)
+        layout.setSpacing(12)
 
-    def _apply_resize(self, width):
-        """Compute scale % from current vs. base width and rescale all fonts."""
-        self._resize_job = None
-        self._in_rescale = True
-        pct = max(60, min(250, int(width / self._base_width * 100)))
-        self._rescale(pct)
-        self._in_rescale = False
+        title = QLabel('FreeD DASHBOARD')
+        title.setFont(QFont(_FONT_SANS, 12, QFont.Weight.Bold))
+        title.setStyleSheet(f'color: {self.FG}; background: transparent;')
+        layout.addWidget(title)
 
-    def _lf(self, parent, text):
-        """Create a styled LabelFrame section"""
-        f = tk.LabelFrame(
-            parent, text=text,
-            bg=self.PANEL_BG, fg=self.DIM,
-            font=self._fonts['hdr'],
-            bd=1, relief='solid',
-            highlightbackground=self.BORDER,
-            padx=8, pady=5
-        )
-        return f
+        self.lbl_cam = QLabel('CAM --')
+        self.lbl_cam.setFont(QFont(_FONT_SANS, 11, QFont.Weight.Bold))
+        self.lbl_cam.setStyleSheet(f'color: {self.YELLOW}; background: transparent;')
+        layout.addWidget(self.lbl_cam)
 
-    def _row(self, parent, label_text, color, row):
-        """Create a label+value row, return the value label"""
-        tk.Label(parent, text=label_text, bg=self.PANEL_BG, fg=self.DIM,
-                 font=self._fonts['lbl'], width=7, anchor='e').grid(
-            row=row, column=0, sticky='e', pady=2)
-        val = tk.Label(parent, text='---', bg=self.PANEL_BG, fg=color,
-                       font=self._fonts['val'], width=26, anchor='w')
-        val.grid(row=row, column=1, sticky='w', padx=(6, 0), pady=2)
-        return val
+        layout.addStretch()
 
-    def _build_layout(self):
-        # ── Header (always visible, above tabs) ──────────────────────
-        hdr = tk.Frame(self.root, bg=self.BORDER, pady=4)
-        hdr.pack(fill='x')
+        ver = QLabel(f'{__version__}  ·  {__author__}')
+        ver.setFont(QFont(_FONT_SANS, 9))
+        ver.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+        layout.addWidget(ver)
 
-        tk.Label(hdr, text='FreeD DASHBOARD', bg=self.BORDER, fg=self.FG,
-                 font=self._fonts['title']).pack(side='left', padx=10)
+        self.lbl_status = QLabel('● WAITING')
+        self.lbl_status.setFont(QFont(_FONT_SANS, 10, QFont.Weight.Bold))
+        self.lbl_status.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+        layout.addWidget(self.lbl_status)
 
-        self.lbl_cam = tk.Label(hdr, text='CAM --', bg=self.BORDER, fg=self.YELLOW,
-                                font=self._fonts['cam'])
-        self.lbl_cam.pack(side='left', padx=8)
+        return hdr
 
-        self.lbl_status = tk.Label(hdr, text='● WAITING', bg=self.BORDER, fg=self.DIM,
-                                   font=self._fonts['hdr'])
-        self.lbl_status.pack(side='right', padx=10)
+    def _build_tabs(self) -> QTabWidget:
+        tabs = QTabWidget()
+        tabs.setDocumentMode(True)
 
-        tk.Label(hdr, text=f'{__version__}  ·  {__author__}',
-                 bg=self.BORDER, fg=self.DIM,
-                 font=self._fonts['small']).pack(side='right', padx=12)
+        dash = QWidget()
+        self._build_dashboard(dash)
+        tabs.addTab(dash, '  Dashboard  ')
 
-        # ── Notebook ─────────────────────────────────────────────────
-        style = ttk.Style()
-        style.theme_use('default')
-        style.configure('D.TNotebook', background=self.BG, borderwidth=0)
-        style.configure('D.TNotebook.Tab', background=self.BORDER, foreground=self.DIM,
-                        font=self._fonts['hdr'], padding=[12, 4])
-        style.map('D.TNotebook.Tab',
-                  background=[('selected', self.PANEL_BG)],
-                  foreground=[('selected', self.GREEN)])
-
-        nb = ttk.Notebook(self.root, style='D.TNotebook')
-        nb.pack(fill='both', expand=True)
-
-        dash = tk.Frame(nb, bg=self.BG)
-        nb.add(dash, text='  Dashboard  ')
-
-        pmap = tk.Frame(nb, bg=self.BG)
-        nb.add(pmap, text='  Packet Map  ')
-
-        # ── Dashboard: 2-column grid ──────────────────────────────────
-        dash.columnconfigure(0, weight=1)
-        dash.columnconfigure(1, weight=1)
-        gpad = dict(padx=8, pady=5, sticky='nsew')
-
-        # Row 0: ROTATION | POSITION
-        rot = self._lf(dash, 'ROTATION')
-        rot.grid(row=0, column=0, **gpad)
-        self.lbl_pan  = self._row(rot, 'Pan',  self.GREEN, 0)
-        self.lbl_tilt = self._row(rot, 'Tilt', self.GREEN, 1)
-        self.lbl_roll = self._row(rot, 'Roll', self.GREEN, 2)
-
-        pos = self._lf(dash, 'POSITION')
-        pos.grid(row=0, column=1, **gpad)
-        self.lbl_x = self._row(pos, 'X', self.CYAN, 0)
-        self.lbl_y = self._row(pos, 'Y', self.CYAN, 1)
-        self.lbl_z = self._row(pos, 'Z', self.CYAN, 2)
-
-        # Row 1: LENS | GENLOCK
-        lens = self._lf(dash, 'LENS')
-        lens.grid(row=1, column=0, **gpad)
-        self.lbl_zoom  = self._row(lens, 'Zoom',  self.YELLOW, 0)
-        self.lbl_focus = self._row(lens, 'Focus', self.YELLOW, 1)
-
-        gl = self._lf(dash, 'GENLOCK')
-        gl.grid(row=1, column=1, **gpad)
-
-        self.lbl_gl_status = tk.Label(gl, text='● WAITING', bg=self.PANEL_BG,
-                                      fg=self.DIM, font=self._fonts['big'])
-        self.lbl_gl_status.grid(row=0, column=0, columnspan=2, pady=(2, 4))
-
-        tk.Label(gl, text='Phase', bg=self.PANEL_BG, fg=self.DIM,
-                 font=self._fonts['lbl'], width=7, anchor='e').grid(row=1, column=0, sticky='e')
-        self.lbl_gl_phase = tk.Label(gl, text='---', bg=self.PANEL_BG, fg=self.CYAN,
-                                     font=self._fonts['med'], anchor='w')
-        self.lbl_gl_phase.grid(row=1, column=1, sticky='w', padx=(6, 0))
-
-        tk.Label(gl, text='Ref', bg=self.PANEL_BG, fg=self.DIM,
-                 font=self._fonts['lbl'], width=7, anchor='e').grid(row=2, column=0, sticky='e')
-        self.lbl_gl_ref = tk.Label(gl, text='---', bg=self.PANEL_BG, fg=self.FG,
-                                   font=self._fonts['medr'], anchor='w')
-        self.lbl_gl_ref.grid(row=2, column=1, sticky='w', padx=(6, 0))
-
-        tk.Label(gl, text='Freq', bg=self.PANEL_BG, fg=self.DIM,
-                 font=self._fonts['lbl'], width=7, anchor='e').grid(row=3, column=0, sticky='e', pady=(4, 0))
-        self.lbl_gl_freq = tk.Label(gl, text='--- Hz', bg=self.PANEL_BG, fg=self.ORANGE,
-                                    font=self._fonts['freq'], anchor='w')
-        self.lbl_gl_freq.grid(row=3, column=1, sticky='w', padx=(6, 0), pady=(4, 0))
-
-        tk.Label(gl, text='Bytes', bg=self.PANEL_BG, fg=self.DIM,
-                 font=self._fonts['lbl'], width=7, anchor='e').grid(row=4, column=0, sticky='e', pady=(4, 0))
-        self.lbl_gl_raw = tk.Label(gl, text='-- --', bg=self.PANEL_BG, fg=self.DIM,
-                                   font=self._fonts['medr'], anchor='w')
-        self.lbl_gl_raw.grid(row=4, column=1, sticky='w', padx=(6, 0), pady=(4, 0))
-
-        # Row 2: STATUS | RAW PACKET
-        tc = self._lf(dash, 'STATUS')
-        tc.grid(row=2, column=0, **gpad)
-
-        self.lbl_tc = tk.Label(tc, text='--:--:--:--', bg=self.PANEL_BG,
-                               fg=self.ORANGE, font=self._fonts['tc'])
-        self.lbl_tc.grid(row=0, column=0, columnspan=2, pady=(2, 4))
-
-        tk.Label(tc, text='Packets', bg=self.PANEL_BG, fg=self.DIM,
-                 font=self._fonts['lbl'], width=7, anchor='e').grid(row=1, column=0, sticky='e')
-        self.lbl_packets = tk.Label(tc, text='0', bg=self.PANEL_BG, fg=self.FG,
-                                    font=self._fonts['medr'], anchor='w')
-        self.lbl_packets.grid(row=1, column=1, sticky='w', padx=(6, 0))
-
-        tk.Label(tc, text='Source', bg=self.PANEL_BG, fg=self.DIM,
-                 font=self._fonts['lbl'], width=7, anchor='e').grid(row=2, column=0, sticky='e')
-        self.lbl_source = tk.Label(tc, text='---', bg=self.PANEL_BG, fg=self.DIM,
-                                   font=self._fonts['small'], anchor='w')
-        self.lbl_source.grid(row=2, column=1, sticky='w', padx=(6, 0))
-
-        tk.Label(tc, text='Port', bg=self.PANEL_BG, fg=self.DIM,
-                 font=self._fonts['lbl'], width=7, anchor='e').grid(row=3, column=0, sticky='e')
-        self.lbl_port = tk.Label(tc, text='45000', bg=self.PANEL_BG, fg=self.DIM,
-                                 font=self._fonts['small'], anchor='w')
-        self.lbl_port.grid(row=3, column=1, sticky='w', padx=(6, 0))
-
-        tk.Label(tc, text='Interval', bg=self.PANEL_BG, fg=self.DIM,
-                 font=self._fonts['lbl'], width=7, anchor='e').grid(row=4, column=0, sticky='e', pady=(4, 0))
-        self.lbl_interval = tk.Label(tc, text='---', bg=self.PANEL_BG, fg=self.CYAN,
-                                     font=self._fonts['med'], anchor='w')
-        self.lbl_interval.grid(row=4, column=1, sticky='w', padx=(6, 0), pady=(4, 0))
-
-        raw = self._lf(dash, 'RAW PACKET')
-        raw.grid(row=2, column=1, **gpad)
-
-        tk.Label(raw, text='Proto', bg=self.PANEL_BG, fg=self.DIM,
-                 font=self._fonts['lbl'], width=7, anchor='e').grid(row=0, column=0, sticky='e', pady=2)
-        self.lbl_proto = tk.Label(raw, text='---', bg=self.PANEL_BG, fg=self.CYAN,
-                                  font=self._fonts['med'], anchor='w')
-        self.lbl_proto.grid(row=0, column=1, sticky='w', padx=(6, 0), pady=2)
-
-        tk.Label(raw, text='Size', bg=self.PANEL_BG, fg=self.DIM,
-                 font=self._fonts['lbl'], width=7, anchor='e').grid(row=1, column=0, sticky='e', pady=2)
-        self.lbl_rawsize = tk.Label(raw, text='---', bg=self.PANEL_BG, fg=self.FG,
-                                    font=self._fonts['medr'], anchor='w')
-        self.lbl_rawsize.grid(row=1, column=1, sticky='w', padx=(6, 0), pady=2)
-
-        tk.Label(raw, text='Hex', bg=self.PANEL_BG, fg=self.DIM,
-                 font=self._fonts['lbl'], width=7, anchor='ne').grid(row=2, column=0, sticky='ne', pady=2)
-        self.lbl_hex1 = tk.Label(raw, text='', bg=self.PANEL_BG, fg='#aaaaaa',
-                                  font=self._fonts['hex'], anchor='w', justify='left',
-                                  width=42)
-        self.lbl_hex1.grid(row=2, column=1, sticky='w', padx=(6, 0), pady=(2, 0))
-        self.lbl_hex2 = tk.Label(raw, text='', bg=self.PANEL_BG, fg='#aaaaaa',
-                                  font=self._fonts['hex'], anchor='w', justify='left',
-                                  width=42)
-        self.lbl_hex2.grid(row=3, column=1, sticky='w', padx=(6, 0), pady=(0, 2))
-
-        tk.Frame(dash, bg=self.BG, height=4).grid(row=3, column=0, columnspan=2)
-
-        # ── Packet Map tab ───────────────────────────────────────────
+        pmap = QWidget()
         self._build_packet_map(pmap)
+        tabs.addTab(pmap, '  Packet Map  ')
 
-    def _build_packet_map(self, parent):
-        """Byte-by-byte packet breakdown table"""
-        style = ttk.Style()
-        style.configure('PM.Treeview',
-                        background=self.PANEL_BG, foreground=self.FG,
-                        fieldbackground=self.PANEL_BG, rowheight=22,
-                        font=self._fonts['pm'])
-        style.configure('PM.Treeview.Heading',
-                        background=self.BORDER, foreground=self.FG,
-                        font=self._fonts['pm_hdr'], relief='flat')
-        style.map('PM.Treeview', background=[('selected', self.BORDER)])
+        return tabs
 
-        cols = ('bytes', 'field', 'raw', 'decoded')
-        tree = ttk.Treeview(parent, columns=cols, show='headings',
-                            style='PM.Treeview', selectmode='none')
+    def _card(self, title: str):
+        """Create a rounded card. Returns (outer_widget, QFormLayout)."""
+        outer = QWidget()
+        outer_layout = QVBoxLayout(outer)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
 
-        tree.heading('bytes',   text='Hex Bytes')
-        tree.heading('field',   text='Field')
-        tree.heading('raw',     text='Raw Value')
-        tree.heading('decoded', text='Decoded')
+        frame = QFrame()
+        frame.setObjectName('card')
+        inner = QVBoxLayout(frame)
+        inner.setContentsMargins(14, 10, 14, 12)
+        inner.setSpacing(6)
 
-        tree.column('bytes',   width=100, anchor='center', stretch=False)
-        tree.column('field',   width=100, anchor='w',      stretch=False)
-        tree.column('raw',     width=100, anchor='e',      stretch=False)
-        tree.column('decoded', width=260, anchor='w',      stretch=True)
+        if title:
+            hdr_lbl = QLabel(title)
+            hdr_lbl.setFont(QFont(_FONT_SANS, 9, QFont.Weight.Bold))
+            hdr_lbl.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+            inner.addWidget(hdr_lbl)
 
-        # Row colour tags
-        tree.tag_configure('meta',  foreground=self.DIM,    background=self.PANEL_BG)
-        tree.tag_configure('rot',   foreground=self.GREEN,  background=self.PANEL_BG)
-        tree.tag_configure('pos',   foreground=self.CYAN,   background=self.PANEL_BG)
-        tree.tag_configure('lens',  foreground=self.YELLOW, background=self.PANEL_BG)
-        tree.tag_configure('spare', foreground=self.ORANGE, background=self.PANEL_BG)
-        tree.tag_configure('chk',   foreground=self.DIM,    background=self.PANEL_BG)
+        form_widget = QWidget()
+        form_widget.setStyleSheet('background: transparent;')
+        form = QFormLayout(form_widget)
+        form.setContentsMargins(0, 2, 0, 0)
+        form.setSpacing(5)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        inner.addWidget(form_widget)
 
-        # Static row definitions: (tag, initial hex placeholder, field label)
+        outer_layout.addWidget(frame)
+        return outer, form
+
+    def _key(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setFont(QFont(_FONT_SANS, 9))
+        lbl.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+        lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        return lbl
+
+    def _val(self, color: str, mono: bool = True, size: int = 12) -> QLabel:
+        lbl = QLabel('---')
+        family = _FONT_MONO if mono else _FONT_SANS
+        lbl.setFont(QFont(family, size, QFont.Weight.Bold))
+        lbl.setStyleSheet(f'color: {color}; background: transparent;')
+        return lbl
+
+    def _build_dashboard(self, parent: QWidget):
+        grid = QGridLayout(parent)
+        grid.setContentsMargins(10, 10, 10, 10)
+        grid.setSpacing(10)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setRowStretch(0, 1)
+        grid.setRowStretch(1, 1)
+        grid.setRowStretch(2, 1)
+
+        # ROTATION
+        rot_outer, rot_form = self._card('ROTATION')
+        self.lbl_pan  = self._val(self.GREEN)
+        self.lbl_tilt = self._val(self.GREEN)
+        self.lbl_roll = self._val(self.GREEN)
+        rot_form.addRow(self._key('Pan'),  self.lbl_pan)
+        rot_form.addRow(self._key('Tilt'), self.lbl_tilt)
+        rot_form.addRow(self._key('Roll'), self.lbl_roll)
+        grid.addWidget(rot_outer, 0, 0)
+
+        # POSITION
+        pos_outer, pos_form = self._card('POSITION')
+        self.lbl_x = self._val(self.CYAN)
+        self.lbl_y = self._val(self.CYAN)
+        self.lbl_z = self._val(self.CYAN)
+        pos_form.addRow(self._key('X'), self.lbl_x)
+        pos_form.addRow(self._key('Y'), self.lbl_y)
+        pos_form.addRow(self._key('Z'), self.lbl_z)
+        grid.addWidget(pos_outer, 0, 1)
+
+        # LENS
+        lens_outer, lens_form = self._card('LENS')
+        self.lbl_zoom  = self._val(self.YELLOW)
+        self.lbl_focus = self._val(self.YELLOW)
+        lens_form.addRow(self._key('Zoom'),  self.lbl_zoom)
+        lens_form.addRow(self._key('Focus'), self.lbl_focus)
+        grid.addWidget(lens_outer, 1, 0)
+
+        # GENLOCK
+        gl_outer = QWidget()
+        gl_vbox = QVBoxLayout(gl_outer)
+        gl_vbox.setContentsMargins(0, 0, 0, 0)
+        gl_frame = QFrame()
+        gl_frame.setObjectName('card')
+        gl_inner = QVBoxLayout(gl_frame)
+        gl_inner.setContentsMargins(14, 10, 14, 12)
+        gl_inner.setSpacing(6)
+
+        gl_title = QLabel('GENLOCK')
+        gl_title.setFont(QFont(_FONT_SANS, 9, QFont.Weight.Bold))
+        gl_title.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+        gl_inner.addWidget(gl_title)
+
+        self.lbl_gl_status = QLabel('● WAITING')
+        self.lbl_gl_status.setFont(QFont(_FONT_SANS, 15, QFont.Weight.Bold))
+        self.lbl_gl_status.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+        self.lbl_gl_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        gl_inner.addWidget(self.lbl_gl_status)
+
+        gl_fw = QWidget()
+        gl_fw.setStyleSheet('background: transparent;')
+        gl_form = QFormLayout(gl_fw)
+        gl_form.setContentsMargins(0, 2, 0, 0)
+        gl_form.setSpacing(5)
+        gl_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        self.lbl_gl_phase = self._val(self.CYAN,   size=11)
+        self.lbl_gl_ref   = self._val(self.FG,     size=10, mono=True)
+        self.lbl_gl_freq  = self._val(self.ORANGE, size=14)
+        self.lbl_gl_raw   = self._val(self.DIM,    size=10)
+        self.lbl_gl_ref.setFont(QFont(_FONT_MONO, 10))
+        self.lbl_gl_raw.setFont(QFont(_FONT_MONO, 10))
+        gl_form.addRow(self._key('Phase'), self.lbl_gl_phase)
+        gl_form.addRow(self._key('Ref'),   self.lbl_gl_ref)
+        gl_form.addRow(self._key('Freq'),  self.lbl_gl_freq)
+        gl_form.addRow(self._key('Bytes'), self.lbl_gl_raw)
+        gl_inner.addWidget(gl_fw)
+        gl_vbox.addWidget(gl_frame)
+        grid.addWidget(gl_outer, 1, 1)
+
+        # STATUS
+        st_outer = QWidget()
+        st_vbox = QVBoxLayout(st_outer)
+        st_vbox.setContentsMargins(0, 0, 0, 0)
+        st_frame = QFrame()
+        st_frame.setObjectName('card')
+        st_inner = QVBoxLayout(st_frame)
+        st_inner.setContentsMargins(14, 10, 14, 12)
+        st_inner.setSpacing(6)
+
+        st_title = QLabel('STATUS')
+        st_title.setFont(QFont(_FONT_SANS, 9, QFont.Weight.Bold))
+        st_title.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+        st_inner.addWidget(st_title)
+
+        self.lbl_tc = QLabel('--:--:--:--')
+        self.lbl_tc.setFont(QFont(_FONT_MONO, 22, QFont.Weight.Bold))
+        self.lbl_tc.setStyleSheet(f'color: {self.ORANGE}; background: transparent;')
+        self.lbl_tc.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        st_inner.addWidget(self.lbl_tc)
+
+        st_fw = QWidget()
+        st_fw.setStyleSheet('background: transparent;')
+        st_form = QFormLayout(st_fw)
+        st_form.setContentsMargins(0, 2, 0, 0)
+        st_form.setSpacing(5)
+        st_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        self.lbl_packets  = self._val(self.FG,  size=11)
+        self.lbl_source   = self._val(self.DIM, size=9, mono=False)
+        self.lbl_port     = self._val(self.DIM, size=9, mono=False)
+        self.lbl_interval = self._val(self.CYAN, size=11)
+        self.lbl_source.setFont(QFont(_FONT_SANS, 9))
+        self.lbl_port.setFont(QFont(_FONT_SANS, 9))
+        st_form.addRow(self._key('Packets'),  self.lbl_packets)
+        st_form.addRow(self._key('Source'),   self.lbl_source)
+        st_form.addRow(self._key('Port'),     self.lbl_port)
+        st_form.addRow(self._key('Interval'), self.lbl_interval)
+        self.lbl_port.setText('45000')
+        st_inner.addWidget(st_fw)
+        st_vbox.addWidget(st_frame)
+        grid.addWidget(st_outer, 2, 0)
+
+        # RAW PACKET
+        raw_outer, raw_form = self._card('RAW PACKET')
+        self.lbl_proto   = self._val(self.CYAN, size=11)
+        self.lbl_rawsize = self._val(self.FG,   size=11)
+        self.lbl_hex1    = self._val('#aaaaaa',  size=9)
+        self.lbl_hex2    = self._val('#aaaaaa',  size=9)
+        self.lbl_hex1.setFont(QFont(_FONT_MONO, 9))
+        self.lbl_hex2.setFont(QFont(_FONT_MONO, 9))
+        raw_form.addRow(self._key('Proto'), self.lbl_proto)
+        raw_form.addRow(self._key('Size'),  self.lbl_rawsize)
+        raw_form.addRow(self._key('Hex'),   self.lbl_hex1)
+        raw_form.addRow(self._key(''),      self.lbl_hex2)
+        grid.addWidget(raw_outer, 2, 1)
+
+    def _build_packet_map(self, parent: QWidget):
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        tbl = QTableWidget(12, 4)
+        tbl.setHorizontalHeaderLabels(['Hex Bytes', 'Field', 'Raw Value', 'Decoded'])
+        tbl.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        tbl.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        tbl.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        tbl.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        tbl.setColumnWidth(0, 110)
+        tbl.setColumnWidth(1, 100)
+        tbl.setColumnWidth(2, 120)
+        tbl.verticalHeader().setVisible(False)
+        tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        tbl.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        tbl.setAlternatingRowColors(False)
+
         rows = [
-            ('meta',  '--',         'Msg Type'),
-            ('meta',  '--',         'Cam ID'),
-            ('rot',   '-- -- --',   'Pan'),
-            ('rot',   '-- -- --',   'Tilt'),
-            ('rot',   '-- -- --',   'Roll'),
-            ('pos',   '-- -- --',   'X'),
-            ('pos',   '-- -- --',   'Y'),
-            ('pos',   '-- -- --',   'Z'),
-            ('lens',  '-- -- --',   'Zoom'),
-            ('lens',  '-- -- --',   'Focus'),
-            ('spare', '-- --',      'Spare'),
-            ('chk',   '--',         'Checksum'),
+            (self.DIM,    '--',       'Msg Type'),
+            (self.DIM,    '--',       'Cam ID'),
+            (self.GREEN,  '-- -- --', 'Pan'),
+            (self.GREEN,  '-- -- --', 'Tilt'),
+            (self.GREEN,  '-- -- --', 'Roll'),
+            (self.CYAN,   '-- -- --', 'X'),
+            (self.CYAN,   '-- -- --', 'Y'),
+            (self.CYAN,   '-- -- --', 'Z'),
+            (self.YELLOW, '-- -- --', 'Zoom'),
+            (self.YELLOW, '-- -- --', 'Focus'),
+            (self.ORANGE, '-- --',    'Spare/GL'),
+            (self.DIM,    '--',       'Checksum'),
         ]
 
-        self._map_iids = []
-        for tag, hex_ph, field in rows:
-            iid = tree.insert('', 'end',
-                              values=(hex_ph, field, '---', '---'),
-                              tags=(tag,))
-            self._map_iids.append(iid)
+        mono = QFont(_FONT_MONO, 10)
+        for i, (color, hex_ph, field) in enumerate(rows):
+            qc = QColor(color)
+            for col, text in enumerate([hex_ph, field, '---', '---']):
+                item = QTableWidgetItem(text)
+                item.setForeground(qc)
+                item.setFont(mono)
+                tbl.setItem(i, col, item)
+            tbl.setRowHeight(i, 26)
 
-        tree.pack(fill='both', expand=True, padx=10, pady=10)
-        self.packet_tree = tree
+        layout.addWidget(tbl)
+        self.packet_table = tbl
+        self._pm_colors = [row[0] for row in rows]
 
     # ------------------------------------------------------------------
     # Receiver (background thread)
@@ -902,46 +949,45 @@ class FreeDReaderGUI:
             self.receiver.socket.bind(('0.0.0.0', 45000))
             self.receiver.running = True
         except Exception as e:
-            self.lbl_status.config(text=f'● ERROR: {e}', fg=self.RED)
+            self.lbl_status.setText(f'● ERROR: {e}')
+            self.lbl_status.setStyleSheet(f'color: {self.RED}; background: transparent;')
             return
 
         self.recv_thread = threading.Thread(
             target=self.receiver.receive_loop,
             daemon=True,
-            name='FreeDReceiveLoop'
+            name='FreeDReceiveLoop',
         )
         self.recv_thread.start()
 
     # ------------------------------------------------------------------
-    # GUI update loop (10 Hz)
+    # Update loop (10 Hz via QTimer)
     # ------------------------------------------------------------------
 
-    def _schedule_update(self):
+    def _do_update(self):
         try:
             self._update()
         except Exception as e:
-            # Never let _update() crash kill the loop; surface the error instead
             try:
-                self.lbl_status.config(text=f'● UI ERR: {str(e)[:40]}', fg=self.RED)
+                self.lbl_status.setText(f'● UI ERR: {str(e)[:40]}')
+                self.lbl_status.setStyleSheet(f'color: {self.RED}; background: transparent;')
             except Exception:
                 pass
-        self.root.after(100, self._schedule_update)
 
     def _update(self):
         if self.receiver is None:
             return
 
-        # Thread health — if the receive thread has died, surface the error
         if self.recv_thread is not None and not self.recv_thread.is_alive():
             err = self.receiver._last_error or 'unknown error'
-            self.lbl_status.config(text=f'● RX DEAD: {err[:40]}', fg=self.RED)
+            self.lbl_status.setText(f'● RX DEAD: {err[:40]}')
+            self.lbl_status.setStyleSheet(f'color: {self.RED}; background: transparent;')
             return
 
         data = self.receiver.latest_data
         addr = self.receiver.latest_addr
 
         if data is None:
-            # No packet yet — show that we ARE listening so user knows it's working
             try:
                 all_ips = sorted({
                     info[4][0]
@@ -951,13 +997,11 @@ class FreeDReaderGUI:
                 ip_str = '  /  '.join(all_ips) if all_ips else '0.0.0.0'
             except Exception:
                 ip_str = '0.0.0.0'
-            self.lbl_status.config(
-                text=f'● LISTENING :45000  [{ip_str}]', fg=self.CYAN)
+            self.lbl_status.setText(f'● LISTENING :45000  [{ip_str}]')
+            self.lbl_status.setStyleSheet(f'color: {self.CYAN}; background: transparent;')
             return
 
         r = self.receiver
-
-        # Stale detection — if no new packet for >2 s, signal loss
         now = time.monotonic()
         is_stale = (r._last_packet_time is not None) and ((now - r._last_packet_time) > 2.0)
 
@@ -965,94 +1009,103 @@ class FreeDReaderGUI:
         pan_deg  = data['pan']  * r.rotation_scale
         tilt_deg = data['tilt'] * r.rotation_scale
         roll_deg = data['roll'] * r.rotation_scale
-        self.lbl_pan.config( text=f'{pan_deg:+8.2f}°  [{data["pan"]}]')
-        self.lbl_tilt.config(text=f'{tilt_deg:+8.2f}°  [{data["tilt"]}]')
-        self.lbl_roll.config(text=f'{roll_deg:+8.2f}°  [{data["roll"]}]')
+        rot_color = self.DIM if is_stale else self.GREEN
+        self.lbl_pan.setText(f'{pan_deg:+8.2f}°  [{data["pan"]}]')
+        self.lbl_pan.setStyleSheet(f'color: {rot_color}; background: transparent;')
+        self.lbl_tilt.setText(f'{tilt_deg:+8.2f}°  [{data["tilt"]}]')
+        self.lbl_tilt.setStyleSheet(f'color: {rot_color}; background: transparent;')
+        self.lbl_roll.setText(f'{roll_deg:+8.2f}°  [{data["roll"]}]')
+        self.lbl_roll.setStyleSheet(f'color: {rot_color}; background: transparent;')
 
         # Position
         x_m = data['position']['x'] * r.position_scale / 1000.0
         y_m = data['position']['y'] * r.position_scale / 1000.0
         z_m = data['position']['z'] * r.position_scale / 1000.0
-        self.lbl_x.config(text=f'{x_m:+7.3f} m  [{data["position"]["x"]}]')
-        self.lbl_y.config(text=f'{y_m:+7.3f} m  [{data["position"]["y"]}]')
-        self.lbl_z.config(text=f'{z_m:+7.3f} m  [{data["position"]["z"]}]')
+        pos_color = self.DIM if is_stale else self.CYAN
+        self.lbl_x.setText(f'{x_m:+7.3f} m  [{data["position"]["x"]}]')
+        self.lbl_x.setStyleSheet(f'color: {pos_color}; background: transparent;')
+        self.lbl_y.setText(f'{y_m:+7.3f} m  [{data["position"]["y"]}]')
+        self.lbl_y.setStyleSheet(f'color: {pos_color}; background: transparent;')
+        self.lbl_z.setText(f'{z_m:+7.3f} m  [{data["position"]["z"]}]')
+        self.lbl_z.setStyleSheet(f'color: {pos_color}; background: transparent;')
 
-        # Lens — direct FreeD values (raw / 1000 per protocol spec)
-        # raw == 0 means no lens data is being transmitted — show dashes
-        focal_length   = data['zoom']  / 1000.0 if data['zoom']  != 0 else None
-        # 0 = no data (zoom-style), 65535 = 0xFFFF = no data (focus encoder sentinel)
+        # Lens
+        focal_length   = data['zoom']  / 1000.0 if data['zoom'] != 0 else None
         focus_distance = abs(data['focus'] / 1000.0) if data['focus'] not in (0, 65535) else None
         total_inches   = focus_distance * 39.3701 if focus_distance is not None else 0.0
         feet           = int(total_inches // 12)
         frac_in        = total_inches % 12
         lens_color = self.DIM if is_stale else self.YELLOW
         if focal_length is None:
-            self.lbl_zoom.config(text=f'---  [{data["zoom"]}]', fg=self.DIM)
+            self.lbl_zoom.setText(f'---  [{data["zoom"]}]')
+            self.lbl_zoom.setStyleSheet(f'color: {self.DIM}; background: transparent;')
         else:
-            self.lbl_zoom.config(text=f'{focal_length:.1f} mm  [{data["zoom"]}]', fg=lens_color)
+            self.lbl_zoom.setText(f'{focal_length:.1f} mm  [{data["zoom"]}]')
+            self.lbl_zoom.setStyleSheet(f'color: {lens_color}; background: transparent;')
         if focus_distance is None:
-            self.lbl_focus.config(text=f'---  [{data["focus"]}]', fg=self.DIM)
+            self.lbl_focus.setText(f'---  [{data["focus"]}]')
+            self.lbl_focus.setStyleSheet(f'color: {self.DIM}; background: transparent;')
         else:
-            self.lbl_focus.config(text=f'{focus_distance:.2f}m  {feet}ft {frac_in:.1f}in  [{data["focus"]}]', fg=lens_color)
+            self.lbl_focus.setText(f'{focus_distance:.2f}m  {feet}ft {frac_in:.1f}in  [{data["focus"]}]')
+            self.lbl_focus.setStyleSheet(f'color: {lens_color}; background: transparent;')
 
         # Timecode
         tc = r.parse_timecode(data['spare'], 24.0)
-        self.lbl_tc.config(text=tc or '--:--:--:--')
+        self.lbl_tc.setText(tc or '--:--:--:--')
 
         # Stats
-        self.lbl_packets.config(text=f"{r.parser.packet_count:,}")
-        self.lbl_cam.config(text=f"CAM {data['camera_id']}")
+        self.lbl_packets.setText(f"{r.parser.packet_count:,}")
+        self.lbl_cam.setText(f"CAM {data['camera_id']}")
         if addr:
-            self.lbl_source.config(text=f'{addr[0]}:{addr[1]}')
+            self.lbl_source.setText(f'{addr[0]}:{addr[1]}')
         if is_stale:
-            self.lbl_status.config(text='● TIMEOUT', fg=self.RED)
+            self.lbl_status.setText('● TIMEOUT')
+            self.lbl_status.setStyleSheet(f'color: {self.RED}; background: transparent;')
         else:
-            self.lbl_status.config(text='● LIVE', fg=self.GREEN)
+            self.lbl_status.setText('● LIVE')
+            self.lbl_status.setStyleSheet(f'color: {self.GREEN}; background: transparent;')
 
-        # Packet interval
         if r.packet_interval_ms is not None:
             fps = r.packet_fps
-            self.lbl_interval.config(text=f'{r.packet_interval_ms:.1f} ms  ({fps:.1f} fps)')
+            self.lbl_interval.setText(f'{r.packet_interval_ms:.1f} ms  ({fps:.1f} fps)')
 
         # Raw packet
-        msg_type = data['message_type']
+        msg_type   = data['message_type']
         proto_name = f'D{msg_type & 0x0F}  (0x{msg_type:02X})'
-        self.lbl_proto.config(text=proto_name)
-        self.lbl_rawsize.config(text=f"{data['packet_size']} bytes")
+        self.lbl_proto.setText(proto_name)
+        self.lbl_rawsize.setText(f"{data['packet_size']} bytes")
         raw = data['raw_bytes']
-        mid = len(raw) // 2
+        mid   = len(raw) // 2
         line1 = ' '.join(f'{b:02X}' for b in raw[:mid])
         line2 = ' '.join(f'{b:02X}' for b in raw[mid:])
-        self.lbl_hex1.config(text=line1)
-        self.lbl_hex2.config(text=line2)
+        self.lbl_hex1.setText(line1)
+        self.lbl_hex2.setText(line2)
 
-        # Genlock status (spare bytes — Sony Ocellus vendor encoding)
-        rb = data['raw_bytes']
+        # Genlock
+        rb        = data['raw_bytes']
         gl_byte26 = rb[26]
         gl_byte27 = rb[27]
-        gl_phase  = (gl_byte26 >> 4) & 0xF   # upper nibble — frame phase counter
+        gl_phase  = (gl_byte26 >> 4) & 0xF
         if is_stale:
-            self.lbl_gl_status.config(text='● NO SIGNAL', fg=self.RED)
-            self.lbl_gl_phase.config(text='---')
-            self.lbl_gl_freq.config(text='--- Hz')
-            self.lbl_gl_raw.config(text='-- --')
+            self.lbl_gl_status.setText('● NO SIGNAL')
+            self.lbl_gl_status.setStyleSheet(f'color: {self.RED}; background: transparent;')
+            self.lbl_gl_phase.setText('---')
+            self.lbl_gl_freq.setText('--- Hz')
+            self.lbl_gl_raw.setText('-- --')
         else:
-            # Phase counter (upper nibble) cycling across packets = locked to ext ref
             is_locked = len(set(r._gl_phase_history)) > 1
-            self.lbl_gl_status.config(
-                text='● LOCKED' if is_locked else '● UNLOCKED',
-                fg=self.GREEN if is_locked else self.RED)
-            self.lbl_gl_phase.config(text=f'{gl_phase:X}h  ({gl_phase}/16)')
+            self.lbl_gl_status.setText('● LOCKED' if is_locked else '● UNLOCKED')
+            self.lbl_gl_status.setStyleSheet(
+                f'color: {self.GREEN if is_locked else self.RED}; background: transparent;')
+            self.lbl_gl_phase.setText(f'{gl_phase:X}h  ({gl_phase}/16)')
             if r.packet_fps is not None:
-                self.lbl_gl_freq.config(text=f'{r.packet_fps:.2f} Hz')
-            self.lbl_gl_raw.config(
-                text=f'0x{gl_byte26:02X} 0x{gl_byte27:02X}  [{gl_byte26:08b}]',
-                fg=self.DIM)
-        self.lbl_gl_ref.config(text=f'0x{gl_byte27:02X} (vendor-defined)')
+                self.lbl_gl_freq.setText(f'{r.packet_fps:.2f} Hz')
+            self.lbl_gl_raw.setText(f'0x{gl_byte26:02X} 0x{gl_byte27:02X}  [{gl_byte26:08b}]')
+        self.lbl_gl_ref.setText(f'0x{gl_byte27:02X} (vendor-defined)')
 
-        # Packet Map tab — update every row with live data
-        if hasattr(self, 'packet_tree'):
-            rb = data['raw_bytes']
+        # Packet Map
+        if hasattr(self, 'packet_table'):
+            rb          = data['raw_bytes']
             gl_phase_pm = (rb[26] >> 4) & 0xF
             lock_str    = 'LOCKED' if len(set(r._gl_phase_history)) > 1 else 'UNLOCKED'
             map_rows = [
@@ -1093,15 +1146,25 @@ class FreeDReaderGUI:
                  'Checksum', f'0x{rb[28]:02X}',
                  'OK' if data['checksum_valid'] else 'MISMATCH'),
             ]
+            mono = QFont(_FONT_MONO, 10)
             for i, (hx, field, raw_val, decoded) in enumerate(map_rows):
-                self.packet_tree.item(self._map_iids[i],
-                                      values=(hx, field, raw_val, decoded))
+                qc = QColor(self._pm_colors[i])
+                for col, text in enumerate([hx, field, raw_val, decoded]):
+                    item = self.packet_table.item(i, col)
+                    if item is None:
+                        item = QTableWidgetItem(text)
+                        item.setFont(mono)
+                        self.packet_table.setItem(i, col, item)
+                    else:
+                        item.setText(text)
+                    item.setForeground(qc)
 
     # ------------------------------------------------------------------
     # Close
     # ------------------------------------------------------------------
 
-    def _on_close(self):
+    def closeEvent(self, event):
+        self._timer.stop()
         if self.receiver:
             self.receiver.running = False
             if self.receiver.socket:
@@ -1109,15 +1172,17 @@ class FreeDReaderGUI:
                     self.receiver.socket.close()
                 except Exception:
                     pass
-        self.root.destroy()
+        event.accept()
+
 
 
 def main_gui():
-    """GUI entry point — launches dark dashboard with baked-in defaults"""
-    root = tk.Tk()
-    FreeDReaderGUI(root)
-    root.mainloop()
-
+    """GUI entry point — launches Apple-dark PyQt6 dashboard"""
+    app = QApplication(sys.argv)
+    app.setApplicationName('FreeD Dashboard')
+    window = FreeDDashboard()
+    window.show()
+    sys.exit(app.exec())
 
 def main():
     """Main entry point"""
