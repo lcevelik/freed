@@ -3,12 +3,12 @@
 FreeD Protocol Reader
 Reads and parses FreeD camera tracking data from UDP socket
 
-Version : v0.9
+Version : v1.0
 Author  : Libor Cevelik
 Copyright (c) 2026 Libor Cevelik. All rights reserved.
 """
 
-__version__   = 'v0.9'
+__version__   = 'v1.0'
 __author__    = 'Libor Cevelik'
 __copyright__ = 'Copyright (c) 2026 Libor Cevelik'
 
