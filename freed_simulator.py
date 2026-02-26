@@ -124,7 +124,6 @@ class FreeDSimulator(QMainWindow):
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._phase = 0
         self._sending = False
-        self._packet_count = 0
 
         self._build_ui()
 
@@ -263,9 +262,6 @@ class FreeDSimulator(QMainWindow):
         root.setContentsMargins(16, 12, 16, 12)
         root.setSpacing(10)
 
-        # Header
-        root.addWidget(self._build_header())
-
         # Main grid: rotation | position
         grid = QGridLayout()
         grid.setSpacing(10)
@@ -289,30 +285,6 @@ class FreeDSimulator(QMainWindow):
 
         # Control bar
         root.addWidget(self._build_control_bar())
-
-    def _build_header(self) -> QFrame:
-        frame = QFrame()
-        frame.setObjectName('card')
-        lay = QHBoxLayout(frame)
-        lay.setContentsMargins(16, 10, 16, 10)
-
-        title = QLabel('FreeD Simulator')
-        title.setObjectName('header')
-        lay.addWidget(title)
-
-        lay.addStretch()
-
-        self._lbl_status = QLabel('STOPPED')
-        self._lbl_status.setObjectName('status')
-        self._lbl_status.setStyleSheet(f'color: {self.DIM};')
-        lay.addWidget(self._lbl_status)
-
-        self._lbl_count = QLabel('0 pkts')
-        self._lbl_count.setObjectName('status')
-        self._lbl_count.setStyleSheet(f'color: {self.DIM}; margin-left: 12px;')
-        lay.addWidget(self._lbl_count)
-
-        return frame
 
     # ── Slider helpers ─────────────────────────────────────────────────────
 
@@ -540,14 +512,9 @@ class FreeDSimulator(QMainWindow):
     def _send_one(self):
         pkt = self._current_packet()
         self._sock.sendto(pkt, (self.TARGET_HOST, self.TARGET_PORT))
-        self._packet_count += 1
-        self._lbl_count.setText(f'{self._packet_count} pkts')
 
     def _send_packet(self):
         self._send_one()
-        if self._sending:
-            self._lbl_status.setText('SENDING')
-            self._lbl_status.setStyleSheet(f'color: {self.GREEN};')
 
     def _start_sending(self):
         self._sending = True
@@ -558,8 +525,6 @@ class FreeDSimulator(QMainWindow):
         self._btn_stop.setEnabled(True)
         self._btn_send_one.setEnabled(False)
         self._spin_fps.setEnabled(False)
-        self._lbl_status.setText('SENDING')
-        self._lbl_status.setStyleSheet(f'color: {self.GREEN};')
 
     def _stop_sending(self):
         self._sending = False
@@ -568,8 +533,6 @@ class FreeDSimulator(QMainWindow):
         self._btn_stop.setEnabled(False)
         self._btn_send_one.setEnabled(True)
         self._spin_fps.setEnabled(True)
-        self._lbl_status.setText('STOPPED')
-        self._lbl_status.setStyleSheet(f'color: {self.DIM};')
 
     def closeEvent(self, event):
         self._timer.stop()
