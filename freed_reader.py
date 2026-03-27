@@ -22,11 +22,16 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFrame, QLabel,
     QGridLayout, QVBoxLayout, QHBoxLayout, QFormLayout,
     QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
+    QSpinBox, QPushButton,
 )
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QFont, QColor
 from collections import deque
 from datetime import datetime
+import os
+os.environ.setdefault('PYQTGRAPH_QT_LIB', 'PyQt6')
+import pyqtgraph as pg
+import numpy as np
 
 # Platform-aware font selection
 if sys.platform == 'darwin':
@@ -517,8 +522,11 @@ class FreeDReceiverGUI(FreeDReceiver):
         self._last_packet_time = None
         self.packet_interval_ms = None   # smoothed ms between packets
         self.packet_fps = None           # smoothed fps
-        self._interval_history = deque(maxlen=30)  # rolling window
-        self._gl_phase_history = deque(maxlen=8)   # phase counter cycling → locked
+        self._interval_history = deque(maxlen=30)   # rolling window (avg/fps)
+        self._gl_phase_history = deque(maxlen=8)    # phase counter cycling → locked
+        self._jitter_history   = deque(maxlen=500)  # long history for jitter tab
+        self._rfc_jitter       = 0.0                # RFC 3550-style jitter accumulator
+        self._prev_interval    = None               # previous interval for RFC diff
 
     def display_data(self, data: dict, addr: tuple):
         now = time.monotonic()
@@ -528,11 +536,19 @@ class FreeDReceiverGUI(FreeDReceiver):
             if interval > 2000.0:
                 self._interval_history.clear()
                 self._gl_phase_history.clear()
+                self._jitter_history.clear()
+                self._rfc_jitter    = 0.0
+                self._prev_interval = None
             else:
                 self._interval_history.append(interval)
                 avg = sum(self._interval_history) / len(self._interval_history)
                 self.packet_interval_ms = avg
                 self.packet_fps = 1000.0 / avg if avg > 0 else None
+                self._jitter_history.append(interval)
+                if self._prev_interval is not None:
+                    d = abs(interval - self._prev_interval)
+                    self._rfc_jitter += (d - self._rfc_jitter) / 16.0
+                self._prev_interval = interval
         self._last_packet_time = now
         # Track genlock phase counter (upper nibble of byte 26)
         rb = data.get('raw_bytes')
@@ -560,6 +576,7 @@ class FreeDDashboard(QMainWindow):
         super().__init__()
         self.receiver = None
         self.recv_thread = None
+        self._active_port = 45000
         self._build_ui()
         self._start_receiver()
         self._timer = QTimer(self)
@@ -693,6 +710,14 @@ class FreeDDashboard(QMainWindow):
         pmap = QWidget()
         self._build_packet_map(pmap)
         tabs.addTab(pmap, '  Packet Map  ')
+
+        jitter = QWidget()
+        self._build_jitter_tab(jitter)
+        tabs.addTab(jitter, '  Jitter  ')
+
+        settings = QWidget()
+        self._build_settings_tab(settings)
+        tabs.addTab(settings, '  Settings  ')
 
         return tabs
 
@@ -857,7 +882,7 @@ class FreeDDashboard(QMainWindow):
         st_form.addRow(self._key('Source'),   self.lbl_source)
         st_form.addRow(self._key('Port'),     self.lbl_port)
         st_form.addRow(self._key('Interval'), self.lbl_interval)
-        self.lbl_port.setText('45000')
+        self.lbl_port.setText(str(self._active_port))
         st_inner.addWidget(st_fw)
         st_vbox.addWidget(st_frame)
         grid.addWidget(st_outer, 2, 0)
@@ -923,14 +948,208 @@ class FreeDDashboard(QMainWindow):
         self.packet_table = tbl
         self._pm_colors = [row[0] for row in rows]
 
+    def _build_jitter_tab(self, parent: QWidget):
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+
+        # ── Stats row ────────────────────────────────────────────────
+        stats_row = QWidget()
+        stats_row.setStyleSheet('background: transparent;')
+        stats_layout = QHBoxLayout(stats_row)
+        stats_layout.setContentsMargins(0, 0, 0, 0)
+        stats_layout.setSpacing(10)
+
+        stat_defs = [
+            ('MEAN',       self.CYAN),
+            ('STD DEV',    self.ORANGE),
+            ('MIN',        self.GREEN),
+            ('MAX',        self.RED),
+            ('PEAK  ±',    self.YELLOW),
+            ('RFC JITTER', self.FG),
+        ]
+        self._jitter_stat_labels = {}
+        for title, color in stat_defs:
+            frame = QFrame()
+            frame.setObjectName('card')
+            vbox = QVBoxLayout(frame)
+            vbox.setContentsMargins(10, 8, 10, 10)
+            vbox.setSpacing(1)
+            lbl_t = QLabel(title)
+            lbl_t.setFont(QFont(_FONT_SANS, 8, QFont.Weight.Bold))
+            lbl_t.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+            lbl_t.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl_v = QLabel('---')
+            lbl_v.setFont(QFont(_FONT_MONO, 13, QFont.Weight.Bold))
+            lbl_v.setStyleSheet(f'color: {color}; background: transparent;')
+            lbl_v.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            vbox.addWidget(lbl_t)
+            vbox.addWidget(lbl_v)
+            stats_layout.addWidget(frame)
+            self._jitter_stat_labels[title] = lbl_v
+
+        layout.addWidget(stats_row)
+
+        # ── Line graph: interval over time ────────────────────────────
+        line_card = QFrame()
+        line_card.setObjectName('card')
+        line_vbox = QVBoxLayout(line_card)
+        line_vbox.setContentsMargins(10, 8, 10, 10)
+        line_vbox.setSpacing(4)
+
+        line_hdr = QLabel('INTERVAL OVER TIME  (last 200 packets)')
+        line_hdr.setFont(QFont(_FONT_SANS, 9, QFont.Weight.Bold))
+        line_hdr.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+        line_vbox.addWidget(line_hdr)
+
+        self._jitter_plot = pg.PlotWidget()
+        self._jitter_plot.setBackground(self.CARD)
+        for axis in ('left', 'bottom'):
+            self._jitter_plot.getAxis(axis).setPen(pg.mkPen(self.BORDER))
+            self._jitter_plot.getAxis(axis).setTextPen(pg.mkPen(self.DIM))
+        self._jitter_plot.showGrid(x=False, y=True, alpha=0.15)
+        self._jitter_plot.setLabel('left',   'ms', color=self.DIM)
+        self._jitter_plot.setLabel('bottom', 'packet #', color=self.DIM)
+        self._jitter_curve = self._jitter_plot.plot(
+            pen=pg.mkPen(color=self.CYAN, width=1.5))
+        self._jitter_mean_line = pg.InfiniteLine(
+            angle=0,
+            pen=pg.mkPen(color=self.GREEN, style=Qt.PenStyle.DashLine, width=1))
+        self._jitter_plot.addItem(self._jitter_mean_line)
+        line_vbox.addWidget(self._jitter_plot)
+        layout.addWidget(line_card, stretch=3)
+
+        # ── Histogram: interval distribution ─────────────────────────
+        hist_card = QFrame()
+        hist_card.setObjectName('card')
+        hist_vbox = QVBoxLayout(hist_card)
+        hist_vbox.setContentsMargins(10, 8, 10, 10)
+        hist_vbox.setSpacing(4)
+
+        hist_hdr = QLabel('INTERVAL DISTRIBUTION  (last 500 packets)')
+        hist_hdr.setFont(QFont(_FONT_SANS, 9, QFont.Weight.Bold))
+        hist_hdr.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+        hist_vbox.addWidget(hist_hdr)
+
+        self._hist_plot = pg.PlotWidget()
+        self._hist_plot.setBackground(self.CARD)
+        for axis in ('left', 'bottom'):
+            self._hist_plot.getAxis(axis).setPen(pg.mkPen(self.BORDER))
+            self._hist_plot.getAxis(axis).setTextPen(pg.mkPen(self.DIM))
+        self._hist_plot.showGrid(x=False, y=True, alpha=0.15)
+        self._hist_plot.setLabel('left',   'count',  color=self.DIM)
+        self._hist_plot.setLabel('bottom', 'ms',     color=self.DIM)
+        self._hist_bars = pg.BarGraphItem(
+            x=[], height=[], width=1,
+            brush=pg.mkBrush(self.ORANGE),
+            pen=pg.mkPen(self.BORDER))
+        self._hist_plot.addItem(self._hist_bars)
+        hist_vbox.addWidget(self._hist_plot)
+        layout.addWidget(hist_card, stretch=2)
+
+    def _build_settings_tab(self, parent: QWidget):
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        # ── Network card ──────────────────────────────────────────────
+        net_frame = QFrame()
+        net_frame.setObjectName('card')
+        net_layout = QVBoxLayout(net_frame)
+        net_layout.setContentsMargins(16, 12, 16, 14)
+        net_layout.setSpacing(10)
+
+        net_title = QLabel('NETWORK')
+        net_title.setFont(QFont(_FONT_SANS, 9, QFont.Weight.Bold))
+        net_title.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+        net_layout.addWidget(net_title)
+
+        row = QWidget()
+        row.setStyleSheet('background: transparent;')
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(10)
+
+        port_lbl = QLabel('UDP Port')
+        port_lbl.setFont(QFont(_FONT_SANS, 11))
+        port_lbl.setStyleSheet(f'color: {self.FG}; background: transparent;')
+        row_layout.addWidget(port_lbl)
+
+        self._settings_port_spin = QSpinBox()
+        self._settings_port_spin.setRange(1024, 65535)
+        self._settings_port_spin.setValue(self._active_port)
+        self._settings_port_spin.setFixedWidth(100)
+        self._settings_port_spin.setStyleSheet(f"""
+            QSpinBox {{
+                background-color: {self.BG};
+                color: {self.FG};
+                border: 1px solid {self.BORDER};
+                border-radius: 6px;
+                padding: 4px 8px;
+                font-family: {_FONT_MONO};
+                font-size: 13px;
+            }}
+            QSpinBox::up-button, QSpinBox::down-button {{
+                width: 18px;
+                background-color: {self.BORDER};
+                border-radius: 3px;
+            }}
+        """)
+        row_layout.addWidget(self._settings_port_spin)
+
+        apply_btn = QPushButton('Apply')
+        apply_btn.setFixedWidth(80)
+        apply_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {self.CYAN};
+                color: #000000;
+                border: none;
+                border-radius: 6px;
+                padding: 5px 14px;
+                font-family: {_FONT_SANS};
+                font-size: 12px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: #5ac8fa;
+            }}
+            QPushButton:pressed {{
+                background-color: #0a84ff;
+            }}
+        """)
+        apply_btn.clicked.connect(self._on_apply_port)
+        row_layout.addWidget(apply_btn)
+        row_layout.addStretch()
+
+        net_layout.addWidget(row)
+
+        self._settings_status = QLabel(f'● Listening on port {self._active_port}')
+        self._settings_status.setFont(QFont(_FONT_SANS, 10))
+        self._settings_status.setStyleSheet(f'color: {self.GREEN}; background: transparent;')
+        net_layout.addWidget(self._settings_status)
+
+        layout.addWidget(net_frame)
+
+    def _on_apply_port(self):
+        port = self._settings_port_spin.value()
+        if port == self._active_port:
+            return
+        self._settings_status.setText(f'● Restarting on port {port}…')
+        self._settings_status.setStyleSheet(f'color: {self.YELLOW}; background: transparent;')
+        QApplication.processEvents()
+        self._restart_receiver(port)
+        self._settings_status.setText(f'● Listening on port {port}')
+        self._settings_status.setStyleSheet(f'color: {self.GREEN}; background: transparent;')
+
     # ------------------------------------------------------------------
     # Receiver (background thread)
     # ------------------------------------------------------------------
 
-    def _start_receiver(self):
+    def _start_receiver(self, port: int = 45000):
         self.receiver = FreeDReceiverGUI(
             host='0.0.0.0',
-            port=45000,
+            port=port,
             ignore_checksum=True,
             timecode_fps=24.0,
             convert_units=True,
@@ -945,7 +1164,7 @@ class FreeDDashboard(QMainWindow):
             except OSError:
                 pass
             self.receiver.socket.settimeout(1.0)
-            self.receiver.socket.bind(('0.0.0.0', 45000))
+            self.receiver.socket.bind(('0.0.0.0', port))
             self.receiver.running = True
         except Exception as e:
             self.lbl_status.setText(f'● ERROR: {e}')
@@ -958,6 +1177,21 @@ class FreeDDashboard(QMainWindow):
             name='FreeDReceiveLoop',
         )
         self.recv_thread.start()
+
+    def _restart_receiver(self, port: int):
+        # Stop existing receiver
+        if self.receiver:
+            self.receiver.running = False
+            try:
+                self.receiver.socket.close()
+            except Exception:
+                pass
+        if self.recv_thread and self.recv_thread.is_alive():
+            self.recv_thread.join(timeout=2.0)
+
+        self._active_port = port
+        self.lbl_port.setText(str(port))
+        self._start_receiver(port)
 
     # ------------------------------------------------------------------
     # Update loop (10 Hz via QTimer)
@@ -1158,6 +1392,46 @@ class FreeDDashboard(QMainWindow):
                         item.setText(text)
                     item.setForeground(qc)
 
+        # Jitter tab
+        if hasattr(self, '_jitter_stat_labels'):
+            self._update_jitter_tab()
+
+    def _update_jitter_tab(self):
+        r       = self.receiver
+        history = list(r._jitter_history)
+        n       = len(history)
+
+        if n < 2:
+            for lbl in self._jitter_stat_labels.values():
+                lbl.setText('---')
+            return
+
+        arr  = np.array(history, dtype=np.float64)
+        mean = float(np.mean(arr))
+        std  = float(np.std(arr))
+        mn   = float(np.min(arr))
+        mx   = float(np.max(arr))
+        peak = max(abs(mx - mean), abs(mn - mean))
+        rfc  = r._rfc_jitter
+
+        self._jitter_stat_labels['MEAN'].setText(f'{mean:.2f} ms')
+        self._jitter_stat_labels['STD DEV'].setText(f'{std:.2f} ms')
+        self._jitter_stat_labels['MIN'].setText(f'{mn:.1f} ms')
+        self._jitter_stat_labels['MAX'].setText(f'{mx:.1f} ms')
+        self._jitter_stat_labels['PEAK  ±'].setText(f'±{peak:.2f} ms')
+        self._jitter_stat_labels['RFC JITTER'].setText(f'{rfc:.2f} ms')
+
+        # Line graph — last 200 samples
+        recent = arr[-200:] if n >= 200 else arr
+        self._jitter_curve.setData(recent.tolist())
+        self._jitter_mean_line.setValue(mean)
+
+        # Histogram — all 500 samples, 30 bins
+        counts, edges = np.histogram(arr, bins=min(30, n))
+        centers = ((edges[:-1] + edges[1:]) / 2).tolist()
+        width   = float(edges[1] - edges[0]) * 0.85
+        self._hist_bars.setOpts(x=centers, height=counts.tolist(), width=width)
+
     # ------------------------------------------------------------------
     # Close
     # ------------------------------------------------------------------
@@ -1181,6 +1455,8 @@ def main_gui():
     app.setApplicationName('FreeD Dashboard')
     window = FreeDDashboard()
     window.show()
+    window.raise_()
+    window.activateWindow()
     sys.exit(app.exec())
 
 def main():
