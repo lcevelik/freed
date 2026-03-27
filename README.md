@@ -2,7 +2,7 @@
 
 A PyQt6 dark-theme GUI application for receiving, parsing, and analysing camera tracking data from the **FreeD (D1) protocol** over UDP.
 
-![Python](https://img.shields.io/badge/Python-3.8%2B-blue) ![PyQt6](https://img.shields.io/badge/PyQt6-6.x-green) ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
+![Version](https://img.shields.io/badge/version-v1.1-orange) ![Python](https://img.shields.io/badge/Python-3.8%2B-blue) ![PyQt6](https://img.shields.io/badge/PyQt6-6.x-green) ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
 
 ---
 
@@ -184,6 +184,48 @@ freed/
 └── dist/
     └── FreeDReader.exe    # Standalone executable
 ```
+
+---
+
+## Changelog
+
+### v1.1 — 2026-03-27
+
+**New features**
+
+- **Jitter tab** — dedicated inter-packet timing analysis panel:
+  - Six real-time stats: Mean, Std Dev, Min, Max, Peak ±, and RFC 3550 jitter
+  - Rolling line graph of the last 200 packet intervals with a mean reference line
+  - Interval distribution histogram over the last 500 packets (30 bins)
+  - Powered by pyqtgraph and numpy for smooth, low-overhead rendering
+- **Settings tab** — configure the UDP listen port at runtime:
+  - Spinbox (range 1024–65535, default 45000) with an Apply button
+  - Receiver restarts on the new port without closing the app
+  - Dashboard port label updates automatically on Apply
+- **run_gui.bat** — double-click launcher for quick startup without a terminal
+
+**Improvements**
+
+- Added `PYQTGRAPH_QT_LIB=PyQt6` environment hint to prevent Qt binding conflicts when both PyQt5 and PyQt6 are installed
+- `window.raise_()` and `window.activateWindow()` ensure the window comes to front on launch
+- README fully rewritten with tab documentation, packet structure table, jitter metric descriptions, troubleshooting, and build instructions
+
+**Dependencies added**
+
+- `pyqtgraph >= 0.14`
+- `numpy >= 1.x`
+
+---
+
+### v1.0 — initial release
+
+- PyQt6 dark-theme GUI dashboard
+- Dashboard tab: rotation, position, lens, genlock, timecode, status, raw packet
+- Packet Map tab: byte-by-byte protocol breakdown
+- FreeD D1 packet parser with XOR checksum validation
+- UDP receiver with 10 Hz UI update loop
+- FreeD Simulator for testing without real hardware
+- Standalone `.exe` via PyInstaller
 
 ---
 
