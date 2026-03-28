@@ -697,14 +697,29 @@ class OpenTrackIOSimulator(QMainWindow):
         gb_tc_lay.setContentsMargins(14, 16, 14, 14)
         gb_tc_lay.setSpacing(10)
 
-        tc_note = QLabel('Timecode is read from the system clock and derived from the selected frame rate.')
+        tc_note = QLabel('Derived from system clock at the selected frame rate.')
         tc_note.setObjectName('dim')
-        tc_note.setWordWrap(True)
         gb_tc_lay.addWidget(tc_note)
+
+        self._lbl_tc_display = QLabel('--:--:--:--')
+        self._lbl_tc_display.setStyleSheet(
+            f'color: {self.CYAN};'
+            f'font-family: "{_FONT_MONO}";'
+            f'font-size: 28px;'
+            f'font-weight: 700;'
+            f'letter-spacing: 2px;'
+        )
+        self._lbl_tc_display.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        gb_tc_lay.addWidget(self._lbl_tc_display)
 
         self._chk_df = QCheckBox('Drop frame  (use with 29.97 / 59.94 fps)')
         self._chk_df.setChecked(False)
         gb_tc_lay.addWidget(self._chk_df)
+
+        # Tick the display every 100 ms regardless of send state
+        self._tc_display_timer = QTimer(self)
+        self._tc_display_timer.timeout.connect(self._refresh_tc_display)
+        self._tc_display_timer.start(100)
 
         lay.addWidget(gb_tc)
 
@@ -821,6 +836,10 @@ class OpenTrackIOSimulator(QMainWindow):
             n, d = fps_map[text]
             self._spin_fps_num.setValue(n)
             self._spin_fps_denom.setValue(d)
+
+    def _refresh_tc_display(self):
+        h, m, s, f = self._get_timecode()
+        self._lbl_tc_display.setText(f'{h:02d}:{m:02d}:{s:02d}:{f:02d}')
 
     # ── JSON / packet builder ──────────────────────────────────────────────
 
@@ -976,6 +995,7 @@ class OpenTrackIOSimulator(QMainWindow):
 
     def closeEvent(self, event):
         self._timer.stop()
+        self._tc_display_timer.stop()
         self._sock.close()
         event.accept()
 
