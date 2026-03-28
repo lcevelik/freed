@@ -672,6 +672,8 @@ class OpenTrackIOSimulator(QMainWindow):
 
         self._spin_fps_num   = self._intbox(1, 240,  25, '', 90)
         self._spin_fps_denom = self._intbox(1, 1001,  1, '', 90)
+        self._spin_fps_num.valueChanged.connect(lambda _: self._sync_send_rate())
+        self._spin_fps_denom.valueChanged.connect(lambda _: self._sync_send_rate())
 
         manual_row = QWidget()
         mr_l = QHBoxLayout(manual_row)
@@ -836,6 +838,13 @@ class OpenTrackIOSimulator(QMainWindow):
             n, d = fps_map[text]
             self._spin_fps_num.setValue(n)
             self._spin_fps_denom.setValue(d)
+        self._sync_send_rate()
+
+    def _sync_send_rate(self):
+        """Keep send rate in sync with the timecode frame rate."""
+        n = self._spin_fps_num.value()
+        d = max(1, self._spin_fps_denom.value())
+        self._spin_send_rate.setValue(max(1, round(n / d)))
 
     def _refresh_tc_display(self):
         h, m, s, f = self._get_timecode()
