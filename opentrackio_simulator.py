@@ -778,11 +778,11 @@ class OpenTrackIOSimulator(QMainWindow):
             return l
 
         self._edit_ip       = QLineEdit('127.0.0.1')
-        self._edit_ip.setFixedWidth(150)
+        self._edit_ip.setFixedWidth(160)
         self._edit_ip.setPlaceholderText('IP address')
 
-        self._spin_port     = self._intbox(1024, 65535, 55555, '', 110)
-        self._spin_send_rate = self._intbox(1, 120, 25, 'fps', 100)
+        self._spin_port      = self._intbox(1024, 65535, 55555, '', 120)
+        self._spin_send_rate = self._intbox(1, 120, 25, 'fps', 120)
 
         self._lbl_status = QLabel('Stopped')
         self._lbl_status.setObjectName('status')
