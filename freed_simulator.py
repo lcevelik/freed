@@ -91,11 +91,8 @@ def build_freed_packet(
         pkt[26] = 0x00
     pkt[27] = 0x00
 
-    # XOR checksum over bytes 0-27
-    checksum = 0
-    for b in pkt[:28]:
-        checksum ^= b
-    pkt[28] = checksum
+    # Device checksum: (byte26 + byte27 + byte28) & 0xFF == 0xF6
+    pkt[28] = (0xF6 - pkt[26] - pkt[27]) & 0xFF
 
     return bytes(pkt)
 
