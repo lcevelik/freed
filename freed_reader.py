@@ -8,7 +8,7 @@ Author  : Libor Cevelik
 Copyright (c) 2026 Libor Cevelik. All rights reserved.
 """
 
-__version__   = 'v1.5'
+__version__   = 'v1.6'
 __author__    = 'Libor Cevelik'
 __copyright__ = 'Copyright (c) 2026 Libor Cevelik'
 
@@ -65,12 +65,10 @@ if sys.platform == 'win32' and 'pytest' not in sys.modules:
 
 
 # ── Config / SDK paths ─────────────────────────────────────────────────────
-# When frozen by PyInstaller, __file__ points inside _MEIPASS (temp dir).
-# Use the directory of the running EXE instead so config persists next to it.
-if getattr(sys, 'frozen', False):
-    _APP_DIR = os.path.dirname(sys.executable)
-else:
-    _APP_DIR = os.path.dirname(os.path.abspath(__file__))
+# Store config in %APPDATA%\FreeDReader so it persists regardless of where
+# the EXE lives. Falls back to the script directory when running from source.
+_APP_DIR = os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), 'FreeDReader')
+os.makedirs(_APP_DIR, exist_ok=True)
 _CONFIG_PATH = os.path.join(_APP_DIR, 'freed_forwarder_config.json')
 _BF_DLL_PATH = r'C:\Program Files\Bluefish444\Developer\driver\Release\BlueVelvetC64.dll'
 
