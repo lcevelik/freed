@@ -209,6 +209,11 @@ class OpenTrackIOSimulator(QMainWindow):
         QDoubleSpinBox::down-button:pressed, QSpinBox::down-button:pressed {{
             background: {self.CYAN};
         }}
+        QDoubleSpinBox:disabled, QSpinBox:disabled {{
+            color: {self.DIM};
+            background-color: #232325;
+            border-color: #2c2c2e;
+        }}
         QLineEdit {{
             background-color: {self.BG};
             color: {self.FG};
