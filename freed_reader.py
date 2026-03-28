@@ -355,6 +355,7 @@ class FreeDForwarder:
                     'oti_port':        self.oti_port,
                     'oti_subject':     self.oti_subject,
                     'oti_source_id':   self.oti_source_id,
+                    'listen_port':     self.listen_port,
                 }
             with open(self._config_path, 'w') as fh:
                 json.dump(data, fh, indent=2)
@@ -381,6 +382,7 @@ class FreeDForwarder:
                 self.oti_port      = int(data.get('oti_port', 55555))
                 self.oti_subject   = data.get('oti_subject', 'Camera')
                 self.oti_source_id = data.get('oti_source_id') or str(uuid.uuid4())
+                self.listen_port   = int(data.get('listen_port', 45000))
         except Exception:
             self.destinations  = [
                 dict(self._PERMANENT),
@@ -394,6 +396,7 @@ class FreeDForwarder:
             self.oti_port      = 55555
             self.oti_subject   = 'Camera'
             self.oti_source_id = str(uuid.uuid4())
+            self.listen_port   = 45000
 
     def close(self):
         if self._sock:
@@ -421,8 +424,8 @@ class FreeDDashboard(QMainWindow):
         super().__init__()
         self.receiver     = None
         self.recv_thread  = None
-        self._active_port = 45000
         self.forwarder    = FreeDForwarder()
+        self._active_port = self.forwarder.listen_port
         self.oti_sender   = OpenTrackIOSender()
         # Apply persisted OTI settings (forwarder.load_config() already ran)
         self.oti_sender.enabled      = self.forwarder.oti_enabled
@@ -1243,6 +1246,8 @@ class FreeDDashboard(QMainWindow):
         self._settings_status.setStyleSheet(f'color: {self.YELLOW}; background: transparent;')
         QApplication.processEvents()
         self._restart_receiver(port)
+        self.forwarder.listen_port = port
+        self.forwarder.save_config()
         self._settings_status.setText(f'● Listening on port {port}')
         self._settings_status.setStyleSheet(f'color: {self.GREEN}; background: transparent;')
 
