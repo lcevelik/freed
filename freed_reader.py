@@ -8,7 +8,7 @@ Author  : Libor Cevelik
 Copyright (c) 2026 Libor Cevelik. All rights reserved.
 """
 
-__version__   = 'v1.6'
+__version__   = 'v1.7'
 __author__    = 'Libor Cevelik'
 __copyright__ = 'Copyright (c) 2026 Libor Cevelik'
 
@@ -825,6 +825,52 @@ class FreeDDashboard(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
 
+        # ── Health banner ─────────────────────────────────────────────
+        banner_frame = QFrame()
+        banner_frame.setObjectName('card')
+        banner_layout = QHBoxLayout(banner_frame)
+        banner_layout.setContentsMargins(16, 10, 16, 10)
+        banner_layout.setSpacing(16)
+
+        self._jitter_health_dot = QLabel('●')
+        self._jitter_health_dot.setFont(QFont(_FONT_SANS, 18, QFont.Weight.Bold))
+        self._jitter_health_dot.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+        banner_layout.addWidget(self._jitter_health_dot)
+
+        banner_text = QWidget()
+        banner_text.setStyleSheet('background: transparent;')
+        banner_text_v = QVBoxLayout(banner_text)
+        banner_text_v.setContentsMargins(0, 0, 0, 0)
+        banner_text_v.setSpacing(1)
+
+        self._jitter_health_lbl = QLabel('WAITING FOR DATA')
+        self._jitter_health_lbl.setFont(QFont(_FONT_SANS, 13, QFont.Weight.Bold))
+        self._jitter_health_lbl.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+        banner_text_v.addWidget(self._jitter_health_lbl)
+
+        self._jitter_health_sub = QLabel('Measuring packet timing jitter — how consistently packets arrive')
+        self._jitter_health_sub.setFont(QFont(_FONT_SANS, 9))
+        self._jitter_health_sub.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+        banner_text_v.addWidget(self._jitter_health_sub)
+
+        banner_layout.addWidget(banner_text, stretch=1)
+
+        # Thresholds legend
+        thresh_w = QWidget()
+        thresh_w.setStyleSheet('background: transparent;')
+        thresh_l = QVBoxLayout(thresh_w)
+        thresh_l.setContentsMargins(0, 0, 0, 0)
+        thresh_l.setSpacing(2)
+        for dot, label in [('●', f'Ideal  < 1ms'), ('●', 'Accept  1–3ms'), ('●', 'Problem > 5ms')]:
+            color = [self.GREEN, self.YELLOW, self.RED][['●', '●', '●'].index(dot) if False else [0,1,2].pop(0)]
+            row = QLabel(f'<span style="color:{color}">●</span>  {label}')
+            row.setFont(QFont(_FONT_SANS, 9))
+            row.setStyleSheet('color: #8e8e93; background: transparent;')
+            thresh_l.addWidget(row)
+        banner_layout.addWidget(thresh_w)
+
+        layout.addWidget(banner_frame)
+
         # ── Stats row ────────────────────────────────────────────────
         stats_row = QWidget()
         stats_row.setStyleSheet('background: transparent;')
@@ -841,6 +887,7 @@ class FreeDDashboard(QMainWindow):
             ('RFC JITTER', self.FG),
         ]
         self._jitter_stat_labels = {}
+        self._jitter_stat_frames = {}
         for title, color in stat_defs:
             frame = QFrame()
             frame.setObjectName('card')
@@ -859,6 +906,7 @@ class FreeDDashboard(QMainWindow):
             vbox.addWidget(lbl_v)
             stats_layout.addWidget(frame)
             self._jitter_stat_labels[title] = lbl_v
+            self._jitter_stat_frames[title] = frame
 
         layout.addWidget(stats_row)
 
@@ -869,7 +917,7 @@ class FreeDDashboard(QMainWindow):
         line_vbox.setContentsMargins(10, 8, 10, 10)
         line_vbox.setSpacing(4)
 
-        line_hdr = QLabel('INTERVAL OVER TIME  (last 200 packets)')
+        line_hdr = QLabel('PACKET INTERVAL OVER TIME  (last 200 packets)   — dashed lines: 1ms ideal / 3ms acceptable / 5ms problematic')
         line_hdr.setFont(QFont(_FONT_SANS, 9, QFont.Weight.Bold))
         line_hdr.setStyleSheet(f'color: {self.DIM}; background: transparent;')
         line_vbox.addWidget(line_hdr)
@@ -885,9 +933,14 @@ class FreeDDashboard(QMainWindow):
         self._jitter_curve = self._jitter_plot.plot(
             pen=pg.mkPen(color=self.CYAN, width=1.5))
         self._jitter_mean_line = pg.InfiniteLine(
-            angle=0,
-            pen=pg.mkPen(color=self.GREEN, style=Qt.PenStyle.DashLine, width=1))
+            angle=0, pen=pg.mkPen(color=self.GREEN, style=Qt.PenStyle.DashLine, width=1))
         self._jitter_plot.addItem(self._jitter_mean_line)
+        # Threshold reference lines
+        for ms, color in [(1.0, self.GREEN), (3.0, self.YELLOW), (5.0, self.RED)]:
+            line = pg.InfiniteLine(
+                pos=ms, angle=0,
+                pen=pg.mkPen(color=color, style=Qt.PenStyle.DotLine, width=1))
+            self._jitter_plot.addItem(line)
         line_vbox.addWidget(self._jitter_plot)
         layout.addWidget(line_card, stretch=3)
 
@@ -1734,6 +1787,33 @@ class FreeDDashboard(QMainWindow):
         self._jitter_stat_labels['MAX'].setText(f'{mx:.1f} ms')
         self._jitter_stat_labels['PEAK  ±'].setText(f'±{peak:.2f} ms')
         self._jitter_stat_labels['RFC JITTER'].setText(f'{rfc:.2f} ms')
+
+        # Health assessment based on RFC jitter (packet timing tolerance for LED volumes)
+        if rfc < 1.0:
+            health_color = self.GREEN
+            health_title = 'IDEAL'
+            health_sub   = f'RFC jitter {rfc:.2f} ms — safe for LED volume, no visible judder expected'
+        elif rfc < 3.0:
+            health_color = self.YELLOW
+            health_title = 'ACCEPTABLE'
+            health_sub   = f'RFC jitter {rfc:.2f} ms — minor timing variation, monitor on fast pans'
+        elif rfc < 5.0:
+            health_color = self.ORANGE
+            health_title = 'MARGINAL'
+            health_sub   = f'RFC jitter {rfc:.2f} ms — approaching problematic, check network/switch'
+        else:
+            health_color = self.RED
+            health_title = 'PROBLEMATIC'
+            health_sub   = f'RFC jitter {rfc:.2f} ms — visible judder likely on LED wall, fix network'
+
+        self._jitter_health_dot.setStyleSheet(f'color: {health_color}; background: transparent;')
+        self._jitter_health_lbl.setText(health_title)
+        self._jitter_health_lbl.setStyleSheet(f'color: {health_color}; background: transparent;')
+        self._jitter_health_sub.setText(health_sub)
+
+        # Color RFC JITTER stat card dynamically
+        self._jitter_stat_labels['RFC JITTER'].setStyleSheet(
+            f'color: {health_color}; background: transparent;')
 
         # Line graph — last 200 samples
         recent = arr[-200:] if n >= 200 else arr
