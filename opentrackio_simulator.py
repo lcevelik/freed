@@ -293,15 +293,15 @@ class OpenTrackIOSimulator(QMainWindow):
 
     def _build_ui(self):
         self.setWindowTitle('OpenTrackIO Simulator v1.0')
-        self.resize(860, 720)
-        self.setMinimumSize(780, 600)
+        self.resize(1000, 800)
+        self.setMinimumSize(900, 680)
         self.setStyleSheet(self._stylesheet())
 
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
-        root.setContentsMargins(14, 10, 14, 10)
-        root.setSpacing(8)
+        root.setContentsMargins(16, 12, 16, 12)
+        root.setSpacing(10)
 
         self._tabs = QTabWidget()
         root.addWidget(self._tabs)
@@ -358,7 +358,7 @@ class OpenTrackIOSimulator(QMainWindow):
 
         lbl = QLabel(label)
         lbl.setObjectName('dim')
-        lbl.setFixedWidth(46)
+        lbl.setFixedWidth(58)
         lay.addWidget(lbl)
 
         scale = int(round(1 / step)) if step < 1 else 1
@@ -672,13 +672,19 @@ class OpenTrackIOSimulator(QMainWindow):
         tc_src_l.addWidget(tc_lbl); tc_src_l.addWidget(self._combo_tc_source); tc_src_l.addStretch()
         gb_tc_lay.addWidget(tc_src_row)
         manual_tc = QWidget(); mtc_l = QHBoxLayout(manual_tc); mtc_l.setContentsMargins(0,0,0,0); mtc_l.setSpacing(6)
-        self._spin_tc_h = self._intbox(0, 23, 0, 'h', 70)
-        self._spin_tc_m = self._intbox(0, 59, 0, 'm', 70)
-        self._spin_tc_s = self._intbox(0, 59, 0, 's', 70)
-        self._spin_tc_f = self._intbox(0, 119, 0, 'f', 70)
-        for sb in [self._spin_tc_h, self._spin_tc_m, self._spin_tc_s, self._spin_tc_f]:
+        self._spin_tc_h = self._intbox(0, 23,  0, '', 64)
+        self._spin_tc_m = self._intbox(0, 59,  0, '', 64)
+        self._spin_tc_s = self._intbox(0, 59,  0, '', 64)
+        self._spin_tc_f = self._intbox(0, 119, 0, '', 64)
+        for sb, lbl_txt in zip(
+            [self._spin_tc_h, self._spin_tc_m, self._spin_tc_s, self._spin_tc_f],
+            ['HH', 'MM', 'SS', 'FF']
+        ):
             sb.setEnabled(False)
-            mtc_l.addWidget(sb)
+            col = QWidget(); cl = QVBoxLayout(col); cl.setContentsMargins(0,0,0,0); cl.setSpacing(2)
+            hdr = QLabel(lbl_txt); hdr.setObjectName('dim'); hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cl.addWidget(hdr); cl.addWidget(sb)
+            mtc_l.addWidget(col)
         mtc_l.addStretch()
         gb_tc_lay.addWidget(manual_tc)
         self._chk_df = QCheckBox('Drop frame (29.97 / 59.94)')
@@ -706,54 +712,64 @@ class OpenTrackIOSimulator(QMainWindow):
         frame = QFrame()
         frame.setObjectName('card')
         frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        lay = QHBoxLayout(frame)
-        lay.setContentsMargins(12, 8, 12, 8)
-        lay.setSpacing(10)
+        outer = QVBoxLayout(frame)
+        outer.setContentsMargins(12, 8, 12, 8)
+        outer.setSpacing(6)
 
-        # Destination
-        ip_lbl = QLabel('Destination:')
+        # ── Row 1: destination + send rate + status ────────────────────────
+        row1 = QHBoxLayout()
+        row1.setSpacing(8)
+
+        ip_lbl = QLabel('Destination IP:')
         ip_lbl.setObjectName('dim')
         self._edit_ip = QLineEdit('127.0.0.1')
-        self._edit_ip.setFixedWidth(130)
-        port_lbl = QLabel(':')
-        port_lbl.setObjectName('dim')
-        self._spin_port = self._intbox(1024, 65535, 55555, '', 80)
-        lay.addWidget(ip_lbl)
-        lay.addWidget(self._edit_ip)
-        lay.addWidget(port_lbl)
-        lay.addWidget(self._spin_port)
+        self._edit_ip.setFixedWidth(140)
 
-        # Send rate
+        port_lbl = QLabel('Port:')
+        port_lbl.setObjectName('dim')
+        self._spin_port = self._intbox(1024, 65535, 55555, '', 90)
+
         rate_lbl = QLabel('Send rate:')
         rate_lbl.setObjectName('dim')
         self._spin_send_rate = self._intbox(1, 120, 25, 'fps', 90)
-        lay.addWidget(rate_lbl)
-        lay.addWidget(self._spin_send_rate)
 
-        lay.addStretch()
-
-        # Status
         self._lbl_status = QLabel('Stopped')
         self._lbl_status.setObjectName('status')
         self._lbl_status.setStyleSheet(f'color: {self.DIM};')
-        lay.addWidget(self._lbl_status)
 
-        lay.addStretch()
+        row1.addWidget(ip_lbl)
+        row1.addWidget(self._edit_ip)
+        row1.addSpacing(8)
+        row1.addWidget(port_lbl)
+        row1.addWidget(self._spin_port)
+        row1.addSpacing(16)
+        row1.addWidget(rate_lbl)
+        row1.addWidget(self._spin_send_rate)
+        row1.addStretch()
+        row1.addWidget(self._lbl_status)
 
-        self._btn_send_one = QPushButton('Send One')
+        # ── Row 2: buttons right-aligned ───────────────────────────────────
+        row2 = QHBoxLayout()
+        row2.setSpacing(8)
+        row2.addStretch()
+
+        self._btn_send_one = QPushButton('Send One Packet')
         self._btn_send_one.clicked.connect(self._send_one)
-        lay.addWidget(self._btn_send_one)
 
         self._btn_start = QPushButton('Start Sending')
         self._btn_start.clicked.connect(self._start_sending)
-        lay.addWidget(self._btn_start)
 
         self._btn_stop = QPushButton('Stop')
         self._btn_stop.setObjectName('stop')
         self._btn_stop.setEnabled(False)
         self._btn_stop.clicked.connect(self._stop_sending)
-        lay.addWidget(self._btn_stop)
 
+        row2.addWidget(self._btn_send_one)
+        row2.addWidget(self._btn_start)
+        row2.addWidget(self._btn_stop)
+
+        outer.addLayout(row1)
+        outer.addLayout(row2)
         return frame
 
     # ── Callbacks ──────────────────────────────────────────────────────────
