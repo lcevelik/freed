@@ -51,7 +51,7 @@ else:                            # Linux / other
 # In --noconsole (windowed) mode stdout/stderr are None; redirect to devnull
 # so that any print() call anywhere in the code never raises an AttributeError
 # and silently kills a background thread.
-if sys.platform == 'win32':
+if sys.platform == 'win32' and 'pytest' not in sys.modules:
     try:
         import io
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')

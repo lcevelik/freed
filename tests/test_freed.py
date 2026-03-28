@@ -431,16 +431,20 @@ class TestFreeDForwarderConfig(unittest.TestCase):
         return freed_reader.FreeDForwarder(config_path=config_path)
 
     def test_load_missing_config_has_defaults(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = tempfile.mkdtemp()
+        try:
             config_path = os.path.join(tmpdir, 'nonexistent_config.json')
             fwd = self._make_forwarder(config_path)
             self.assertEqual(fwd.tc_fps, 25.0)
             self.assertEqual(fwd.ltc_connector, 2)
             self.assertTrue(fwd.tc_inject)
             self.assertEqual(fwd.listen_port, 45000)
+        finally:
+            import shutil; shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_save_and_reload_config(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = tempfile.mkdtemp()
+        try:
             config_path = os.path.join(tmpdir, 'test_config.json')
             fwd = self._make_forwarder(config_path)
             fwd.tc_fps = 29.97
@@ -454,6 +458,8 @@ class TestFreeDForwarderConfig(unittest.TestCase):
             self.assertEqual(fwd2.ltc_connector, 3)
             self.assertEqual(fwd2.listen_port, 50000)
             self.assertTrue(fwd2.oti_enabled)
+        finally:
+            import shutil; shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -471,25 +477,26 @@ class TestInjectTCChecksum(unittest.TestCase):
         return fwd
 
     def test_inject_tc_checksum_is_xor(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = tempfile.mkdtemp()
+        try:
             config_path = os.path.join(tmpdir, 'cfg.json')
             fwd = self._make_forwarder(config_path)
-
-        raw_pkt = build_freed_packet(
-            camera_id=1,
-            pan_deg=10.0, tilt_deg=5.0, roll_deg=0.0,
-            x_m=0.0, y_m=0.0, z_m=0.0,
-            zoom_mm=35.0, zoom_no_data=False,
-            focus_m=2.0, focus_no_data=False,
-            genlock_on=False, phase_counter=0,
-        )
-        result = fwd._inject_tc(bytearray(raw_pkt), ltc_reader=None)
-
-        # Verify the checksum at byte 28 is XOR of bytes 0-27
-        expected_ck = 0
-        for b in result[:28]:
-            expected_ck ^= b
-        self.assertEqual(result[28], expected_ck)
+            raw_pkt = build_freed_packet(
+                camera_id=1,
+                pan_deg=10.0, tilt_deg=5.0, roll_deg=0.0,
+                x_m=0.0, y_m=0.0, z_m=0.0,
+                zoom_mm=35.0, zoom_no_data=False,
+                focus_m=2.0, focus_no_data=False,
+                genlock_on=False, phase_counter=0,
+            )
+            result = fwd._inject_tc(bytearray(raw_pkt), ltc_reader=None)
+            # Verify the checksum at byte 28 is XOR of bytes 0-27
+            expected_ck = 0
+            for b in result[:28]:
+                expected_ck ^= b
+            self.assertEqual(result[28], expected_ck)
+        finally:
+            import shutil; shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 if __name__ == '__main__':
