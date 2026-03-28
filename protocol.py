@@ -24,10 +24,7 @@ class FreeDParser:
 
     def parse_24bit_int(self, data: bytes) -> int:
         """Convert 3 bytes to signed 24-bit integer"""
-        value = int.from_bytes(data, byteorder='big', signed=False)
-        if value & 0x800000:
-            value -= 0x1000000
-        return value
+        return int.from_bytes(data[:3], byteorder='big', signed=True)
 
     def calculate_checksum(self, data: bytes) -> int:
         """Calculate XOR checksum of all bytes"""
@@ -66,8 +63,8 @@ class FreeDParser:
             return None
 
         # Verify checksum
-        calculated_checksum = self.calculate_checksum(data[:-1])
-        packet_checksum = data[-1]
+        calculated_checksum = self.calculate_checksum(data[:28])
+        packet_checksum = data[28]
 
         if calculated_checksum != packet_checksum:
             checksum_valid = False

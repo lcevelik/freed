@@ -54,10 +54,12 @@ class OpenTrackIOSender:
         if not self.enabled or self._sock is None:
             return
         try:
-            payload = self._build_json(data, ltc_reader, fps)
-            packet  = self._build_packet(payload)
+            with self._lock:
+                self._seq = (self._seq + 1) & 0xFFFF
+                seq = self._seq
+            payload = self._build_json(data, ltc_reader, fps, seq)
+            packet  = self._build_packet(payload, seq)
             self._sock.sendto(packet, (self.ip, self.port))
-            self._seq = (self._seq + 1) & 0xFFFF
         except Exception:
             pass
 
@@ -70,7 +72,7 @@ class OpenTrackIOSender:
 
     # ── internals ──────────────────────────────────────────────────────────
 
-    def _build_json(self, data: dict, ltc_reader, fps: float) -> bytes:
+    def _build_json(self, data: dict, ltc_reader, fps: float, seq: int) -> bytes:
         fps_int = max(1, round(fps))
         # Timecode source
         if ltc_reader and ltc_reader.available:
@@ -104,7 +106,7 @@ class OpenTrackIOSender:
             'timing': {
                 'mode':        'external',
                 'sampleRate':  {'num': fps_int, 'denom': 1},
-                'frameCount':  self._seq,
+                'frameCount':  seq,
                 'timecode': {
                     'hours':   h, 'minutes': m,
                     'seconds': s, 'frames':  f,
@@ -128,10 +130,7 @@ class OpenTrackIOSender:
         }
         return json.dumps(payload, separators=(',', ':')).encode('utf-8')
 
-    def _build_packet(self, payload: bytes) -> bytes:
-        with self._lock:
-            self._seq = (self._seq + 1) & 0xFFFF
-            seq = self._seq
+    def _build_packet(self, payload: bytes, seq: int) -> bytes:
         n = len(payload)
         # 14-byte header before checksum (spec table, bits 0-111)
         hdr = bytearray(14)
