@@ -488,16 +488,16 @@ class OpenTrackIOSimulator(QMainWindow):
 
         # Aperture & optics
         gb_ap, gb_ap_lay = self._group('Aperture & Optics')
-        self._spin_fstop = self._spinbox(0.7, 64.0, 2.8, 0.1, 1, 'f/', color=self.PURPLE)
-        self._spin_tstop = self._spinbox(0.7, 64.0, 3.2, 0.1, 1, 'T/', color=self.PURPLE)
-        self._chk_fstop  = QCheckBox('Include f-stop')
-        self._chk_tstop  = QCheckBox('Include t-stop')
+        self._chk_fstop = QCheckBox('Include f-stop')
+        self._chk_tstop = QCheckBox('Include t-stop')
         self._chk_fstop.setChecked(True)
         self._chk_tstop.setChecked(True)
-        gb_ap_lay.addWidget(self._form_row('f-Stop', self._spin_fstop))
+        rf, self._spin_fstop = self._slider_row('f/',  0.7, 64.0, 0.1, 2.8, 'f/', self.PURPLE)
+        rt, self._spin_tstop = self._slider_row('T/',  0.7, 64.0, 0.1, 3.2, 'T/', self.PURPLE)
         gb_ap_lay.addWidget(self._chk_fstop)
-        gb_ap_lay.addWidget(self._form_row('T-Stop', self._spin_tstop))
+        gb_ap_lay.addWidget(rf)
         gb_ap_lay.addWidget(self._chk_tstop)
+        gb_ap_lay.addWidget(rt)
         lay.addWidget(gb_ap)
 
         # Entrance pupil & anamorphic
