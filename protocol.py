@@ -27,11 +27,16 @@ class FreeDParser:
         return int.from_bytes(data[:3], byteorder='big', signed=True)
 
     def calculate_checksum(self, data: bytes) -> int:
-        """Calculate XOR checksum of all bytes"""
-        checksum = 0
-        for byte in data:
-            checksum ^= byte
-        return checksum
+        """
+        Calculate expected checksum byte (byte 28) using the device's scheme:
+        bytes 26 + 27 + 28 must sum to 0xF6 (mod 256).
+        Returns the expected value of byte 28.
+        """
+        return (0xF6 - data[26] - data[27]) & 0xFF
+
+    def verify_checksum(self, data: bytes) -> bool:
+        """Return True if (byte26 + byte27 + byte28) & 0xFF == 0xF6."""
+        return (data[26] + data[27] + data[28]) & 0xFF == 0xF6
 
     def parse(self, data: bytes) -> dict:
         """
@@ -62,12 +67,12 @@ class FreeDParser:
                 print(f"  ERROR: {error_reason}")
             return None
 
-        # Verify checksum
-        calculated_checksum = self.calculate_checksum(data[:28])
+        # Verify checksum: device uses (byte26 + byte27 + byte28) & 0xFF == 0xF6
+        calculated_checksum = self.calculate_checksum(data)
         packet_checksum = data[28]
+        checksum_valid = self.verify_checksum(data)
 
-        if calculated_checksum != packet_checksum:
-            checksum_valid = False
+        if not checksum_valid:
             if not self.ignore_checksum:
                 self.error_count += 1
                 if self.debug:

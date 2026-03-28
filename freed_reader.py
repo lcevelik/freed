@@ -327,10 +327,7 @@ class FreeDForwarder:
         wire = ((h & 0x1F) << 11) | ((m & 0x3F) << 5) | ((s >> 1) & 0x1F)
         raw[26] = (wire >> 8) & 0xFF
         raw[27] =  wire       & 0xFF
-        checksum = 0
-        for b in raw[:28]:
-            checksum ^= b
-        raw[28] = checksum
+        raw[28] = (0xF6 - raw[26] - raw[27]) & 0xFF
         # Bytes 29–32: extended TC block — full H:M:S:F, one byte each
         raw += bytearray([h & 0xFF, m & 0xFF, s & 0xFF, f & 0xFF])
         return raw

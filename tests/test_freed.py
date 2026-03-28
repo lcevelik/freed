@@ -61,11 +61,8 @@ def build_freed_packet(
         pkt[26] = 0x00
     pkt[27] = 0x00
 
-    # XOR checksum over bytes 0-27
-    checksum = 0
-    for b in pkt[:28]:
-        checksum ^= b
-    pkt[28] = checksum
+    # Device checksum: (byte26 + byte27 + byte28) & 0xFF == 0xF6
+    pkt[28] = (0xF6 - pkt[26] - pkt[27]) & 0xFF
 
     return bytes(pkt)
 
@@ -101,12 +98,31 @@ class TestFreeDParser(unittest.TestCase):
         self.assertEqual(self.parser.parse_24bit_int(data), 0)
 
     def test_calculate_checksum_known_value(self):
-        # XOR of [0xD1, 0x01, 0x00] = 0xD1 ^ 0x01 ^ 0x00 = 0xD0
-        data = bytes([0xD1, 0x01, 0x00])
-        self.assertEqual(self.parser.calculate_checksum(data), 0xD0)
+        # calculate_checksum returns (0xF6 - byte26 - byte27) & 0xFF
+        # For a 29-byte packet with byte26=0x00, byte27=0x00: expected = 0xF6
+        pkt = bytearray(29)
+        pkt[0] = 0xD1
+        self.assertEqual(self.parser.calculate_checksum(bytes(pkt)), 0xF6)
 
-    def test_calculate_checksum_empty(self):
-        self.assertEqual(self.parser.calculate_checksum(b''), 0)
+    def test_calculate_checksum_known_value2(self):
+        # byte26=0x31, byte27=0x20 → expected = (0xF6 - 0x31 - 0x20) & 0xFF = 0xA5
+        pkt = bytearray(29)
+        pkt[0] = 0xD1
+        pkt[26] = 0x31
+        pkt[27] = 0x20
+        self.assertEqual(self.parser.calculate_checksum(bytes(pkt)), 0xA5)
+
+    def test_verify_checksum_valid(self):
+        pkt = bytearray(29)
+        pkt[0] = 0xD1
+        pkt[26] = 0x31; pkt[27] = 0x20; pkt[28] = 0xA5
+        self.assertTrue(self.parser.verify_checksum(bytes(pkt)))
+
+    def test_verify_checksum_invalid(self):
+        pkt = bytearray(29)
+        pkt[0] = 0xD1
+        pkt[26] = 0x31; pkt[27] = 0x20; pkt[28] = 0x00  # wrong
+        self.assertFalse(self.parser.verify_checksum(bytes(pkt)))
 
     def _make_valid_packet(self, camera_id=1):
         """Build a minimal valid 29-byte FreeD D1 packet."""
@@ -267,10 +283,8 @@ class TestBuildFreeDPacket(unittest.TestCase):
 
     def test_packet_checksum_valid(self):
         pkt = self._pkt()
-        expected = 0
-        for b in pkt[:28]:
-            expected ^= b
-        self.assertEqual(pkt[28], expected)
+        # Device checksum: (byte26 + byte27 + byte28) & 0xFF == 0xF6
+        self.assertEqual((pkt[26] + pkt[27] + pkt[28]) & 0xFF, 0xF6)
 
     def test_packet_pan_encode_decode(self):
         pan_deg = 12.5
@@ -476,7 +490,7 @@ class TestInjectTCChecksum(unittest.TestCase):
         fwd.tc_fps = 25.0
         return fwd
 
-    def test_inject_tc_checksum_is_xor(self):
+    def test_inject_tc_checksum_is_valid(self):
         tmpdir = tempfile.mkdtemp()
         try:
             config_path = os.path.join(tmpdir, 'cfg.json')
@@ -490,11 +504,8 @@ class TestInjectTCChecksum(unittest.TestCase):
                 genlock_on=False, phase_counter=0,
             )
             result = fwd._inject_tc(bytearray(raw_pkt), ltc_reader=None)
-            # Verify the checksum at byte 28 is XOR of bytes 0-27
-            expected_ck = 0
-            for b in result[:28]:
-                expected_ck ^= b
-            self.assertEqual(result[28], expected_ck)
+            # Verify checksum: (byte26 + byte27 + byte28) & 0xFF == 0xF6
+            self.assertEqual((result[26] + result[27] + result[28]) & 0xFF, 0xF6)
         finally:
             import shutil; shutil.rmtree(tmpdir, ignore_errors=True)
 
