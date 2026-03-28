@@ -8,7 +8,7 @@ Author  : Libor Cevelik
 Copyright (c) 2026 Libor Cevelik. All rights reserved.
 """
 
-__version__   = 'v1.7'
+__version__   = 'v1.8'
 __author__    = 'Libor Cevelik'
 __copyright__ = 'Copyright (c) 2026 Libor Cevelik'
 
@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFrame, QLabel,
     QGridLayout, QVBoxLayout, QHBoxLayout, QFormLayout,
     QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
-    QSpinBox, QPushButton, QLineEdit, QComboBox,
+    QSpinBox, QPushButton, QLineEdit, QComboBox, QTextEdit, QScrollArea,
 )
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QFont, QColor
@@ -821,6 +821,34 @@ class FreeDDashboard(QMainWindow):
         self._pm_colors = [row[0] for row in rows]
 
     def _build_jitter_tab(self, parent: QWidget):
+        outer = QVBoxLayout(parent)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        sub = QTabWidget()
+        sub.setStyleSheet(f"""
+            QTabWidget::pane {{ border: none; background-color: {self.BG}; }}
+            QTabBar::tab {{
+                background-color: {self.BG}; color: {self.DIM};
+                padding: 6px 16px; border: none; font-size: 12px;
+                font-family: {_FONT_SANS};
+            }}
+            QTabBar::tab:selected {{ color: {self.FG}; border-bottom: 2px solid {self.CYAN}; }}
+            QTabBar::tab:hover {{ color: {self.FG}; }}
+        """)
+        outer.addWidget(sub)
+
+        monitor_page = QWidget()
+        monitor_page.setStyleSheet(f'background-color: {self.BG};')
+        sub.addTab(monitor_page, 'Monitor')
+
+        ref_page = QWidget()
+        ref_page.setStyleSheet(f'background-color: {self.BG};')
+        self._build_jitter_reference(ref_page)
+        sub.addTab(ref_page, 'Reference')
+
+        # rest of monitor tab built into monitor_page
+        parent = monitor_page
         layout = QVBoxLayout(parent)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
@@ -971,6 +999,172 @@ class FreeDDashboard(QMainWindow):
         self._hist_plot.addItem(self._hist_bars)
         hist_vbox.addWidget(self._hist_plot)
         layout.addWidget(hist_card, stretch=2)
+
+    def _build_jitter_reference(self, parent: QWidget):
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(0)
+
+        doc = QTextEdit()
+        doc.setReadOnly(True)
+        doc.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: {self.CARD};
+                color: {self.FG};
+                border: 1px solid {self.BORDER};
+                border-radius: 10px;
+                padding: 14px;
+                font-family: {_FONT_SANS};
+                font-size: 12px;
+            }}
+            QScrollBar:vertical {{
+                background: {self.BG}; width: 8px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {self.BORDER}; border-radius: 4px;
+            }}
+        """)
+        doc.setHtml(f"""
+<style>
+  body   {{ color: {self.FG}; font-family: {_FONT_SANS}; font-size: 12px; line-height: 1.6; }}
+  h1     {{ color: {self.CYAN}; font-size: 15px; margin-top: 0; margin-bottom: 4px; }}
+  h2     {{ color: {self.FG}; font-size: 13px; margin-top: 18px; margin-bottom: 4px; border-bottom: 1px solid {self.BORDER}; padding-bottom: 3px; }}
+  h3     {{ color: {self.YELLOW}; font-size: 12px; margin-top: 12px; margin-bottom: 2px; }}
+  p      {{ color: {self.FG}; margin: 4px 0; }}
+  .dim   {{ color: {self.DIM}; }}
+  .good  {{ color: {self.GREEN}; font-weight: bold; }}
+  .warn  {{ color: {self.YELLOW}; font-weight: bold; }}
+  .bad   {{ color: {self.RED}; font-weight: bold; }}
+  .note  {{ color: {self.ORANGE}; }}
+  table  {{ border-collapse: collapse; width: 100%; margin: 8px 0; }}
+  th     {{ color: {self.DIM}; font-size: 11px; text-align: left; padding: 4px 8px;
+            border-bottom: 1px solid {self.BORDER}; }}
+  td     {{ padding: 4px 8px; border-bottom: 1px solid {self.BORDER}; color: {self.FG}; }}
+  tr:last-child td {{ border-bottom: none; }}
+  ul     {{ margin: 4px 0 4px 16px; padding: 0; }}
+  li     {{ margin: 2px 0; }}
+</style>
+
+<h1>FreeD Jitter — Reference Guide</h1>
+<p class="dim">Professional thresholds for virtual production and LED volume work.</p>
+
+<h2>Packet Timing Jitter</h2>
+<table>
+  <tr><th>Rating</th><th>Threshold</th><th>Effect</th></tr>
+  <tr><td><span class="good">Ideal</span></td><td>&lt; 1 ms</td><td>No visible impact</td></tr>
+  <tr><td><span class="warn">Acceptable</span></td><td>1 – 3 ms</td><td>Safe, monitor on fast pans</td></tr>
+  <tr><td><span class="bad">Problematic</span></td><td>&gt; 5 ms</td><td>Visible judder on LED wall, especially fast pans</td></tr>
+</table>
+
+<h2>Position Data (X / Y / Z)</h2>
+<table>
+  <tr><th>Rating</th><th>Variation at rest</th><th>Effect</th></tr>
+  <tr><td><span class="good">Ideal</span></td><td>&lt; 0.1 mm</td><td>No visible impact</td></tr>
+  <tr><td><span class="warn">Acceptable</span></td><td>&lt; 0.5 mm</td><td>Minor, generally invisible</td></tr>
+  <tr><td><span class="bad">Problematic</span></td><td>&gt; 1 mm</td><td>Swimming / floating on composited CG elements</td></tr>
+</table>
+
+<h2>Rotation Data (Pan / Tilt / Roll)</h2>
+<table>
+  <tr><th>Rating</th><th>Variation at rest</th><th>Effect</th></tr>
+  <tr><td><span class="good">Ideal</span></td><td>&lt; 0.01°</td><td>No visible impact</td></tr>
+  <tr><td><span class="warn">Acceptable</span></td><td>&lt; 0.05°</td><td>Minor, watch on wide lenses</td></tr>
+  <tr><td><span class="bad">Problematic</span></td><td>&gt; 0.1°</td><td>Visible horizon drift, especially wide lenses</td></tr>
+</table>
+
+<h2>Zoom / Focus</h2>
+<p>Less sensitive — 0.5–1% variance is generally fine unless doing tight macro work.</p>
+
+<h2>Typical Jitter by Source</h2>
+<table>
+  <tr><th>Source</th><th>Typical Jitter</th><th>Notes</th></tr>
+  <tr><td>Encoded tracking (Mo-Sys, Ncam)</td><td>~0.5–1 ms</td><td>Best case via dedicated UDP stream</td></tr>
+  <tr><td>FreeD over serial (RS-422)</td><td>1–2 ms</td><td>Hardware-limited but stable</td></tr>
+  <tr><td>FreeD over UDP (network)</td><td>1–5 ms</td><td>Switch-dependent; use unmanaged or QoS-configured</td></tr>
+  <tr><td>LiveLink bridge (UE5)</td><td>+1–3 ms added</td><td>LiveLink adds its own buffering</td></tr>
+</table>
+
+<h2>Key Considerations</h2>
+<ul>
+  <li><span class="note">Genlock is the bigger variable</span> — if your FreeD source isn't locked to the same sync signal as your camera/LED system, even 1 ms jitter can look like more because it's frame-phase-inconsistent.</li>
+  <li>LiveLink Subject in UE5 buffers FreeD data — tune buffer size in LiveLink settings to smooth jitter at the cost of latency.</li>
+  <li>nDisplay rendering latency matters more than raw FreeD jitter — the two need to be tuned together.</li>
+  <li>At 24fps, one frame = ~41.7 ms — anything under 5 ms jitter is within a single frame and manageable with buffer compensation.</li>
+  <li><span class="note">Rule of thumb:</span> if it's invisible at rest on a locked-off shot, it's acceptable. Static jitter above 0.5 mm or 0.05° will almost always be visible on a composited CG floor or horizon line.</li>
+</ul>
+
+<h2>Common Causes &amp; Fixes</h2>
+
+<h3>1. Network / UDP Transport</h3>
+<table>
+  <tr><th>Cause</th><th>Fix</th></tr>
+  <tr><td>Shared network with other traffic</td><td>Dedicated VLAN or isolated switch for tracking data</td></tr>
+  <tr><td>Managed switch with STP/IGMP overhead</td><td>Use unmanaged switch, or disable STP on tracking ports</td></tr>
+  <tr><td>Wrong switch QoS settings</td><td>Tag FreeD UDP traffic with highest QoS priority (DSCP EF)</td></tr>
+  <tr><td>Long cable runs with cheap switches</td><td>Stay under 3 hops; use Cat6 point-to-point where possible</td></tr>
+  <tr><td>Wireless anywhere in the chain</td><td>Eliminate entirely — FreeD must be wired end-to-end</td></tr>
+</table>
+
+<h3>2. Tracking System Hardware</h3>
+<table>
+  <tr><th>Cause</th><th>Fix</th></tr>
+  <tr><td>Optical/encoder head vibration</td><td>Check rig mounting — loose head bolts are a common culprit</td></tr>
+  <tr><td>Mechanical encoder slop on pan/tilt</td><td>Re-calibrate zero point; check encoder coupling for backlash</td></tr>
+  <tr><td>IR interference (Vicon, Ncam)</td><td>Check IR reflector cleanliness; eliminate competing IR sources (LED wall leakage, windows)</td></tr>
+  <tr><td>Camera cable drag on inertial sensors</td><td>Reroute cables so they don't pull on the head</td></tr>
+  <tr><td>Thermal drift</td><td>Allow 15–20 min warm-up before calibration on IMU-based systems</td></tr>
+</table>
+
+<h3>3. Serial / RS-422 Source</h3>
+<table>
+  <tr><th>Cause</th><th>Fix</th></tr>
+  <tr><td>Cable too long</td><td>Keep RS-422 under 300 m; use proper termination (120Ω)</td></tr>
+  <tr><td>Ground loop on serial line</td><td>Use isolated RS-422 converter</td></tr>
+  <tr><td>Baud rate mismatch causing re-sync</td><td>Confirm both ends locked to same baud (usually 38400 for FreeD)</td></tr>
+  <tr><td>USB-to-serial adapter</td><td>Replace with dedicated RS-422 PCIe card — USB adds 2–8 ms variable latency</td></tr>
+</table>
+
+<h3>4. FreeD Relay / Bridge Software</h3>
+<table>
+  <tr><th>Cause</th><th>Fix</th></tr>
+  <tr><td>Python relay running on shared CPU</td><td>Pin process to isolated CPU core; set high process priority</td></tr>
+  <tr><td>Relay on same machine as UE5</td><td>Move relay to dedicated small PC or use hardware converter</td></tr>
+  <tr><td>Virtual NIC or VPN active on relay machine</td><td>Disable all non-essential network adapters</td></tr>
+  <tr><td>OS scheduling interrupts (Windows)</td><td>Enable High Performance power plan; disable CPU parking; consider MMCSS tuning</td></tr>
+</table>
+
+<h3>5. Unreal Engine / LiveLink</h3>
+<table>
+  <tr><th>Cause</th><th>Fix</th></tr>
+  <tr><td>LiveLink buffer too small (dropping packets)</td><td>Increase LiveLink subject buffer size in Project Settings</td></tr>
+  <tr><td>LiveLink buffer too large (added latency)</td><td>Reduce buffer — find minimum that eliminates visible jitter</td></tr>
+  <tr><td>UE5 running below target framerate</td><td>Reduce scene complexity or use nDisplay load balancing</td></tr>
+  <tr><td>LiveLink running on game thread</td><td>Use LiveLink Hub as external process to offload from game thread</td></tr>
+  <tr><td>Wrong timecode source in LiveLink</td><td>Ensure LiveLink timecode provider matches your genlock master</td></tr>
+</table>
+
+<h3>6. Genlock / Sync Mismatch</h3>
+<p class="dim">Most subtle and commonly misdiagnosed — data looks clean but appears jittery because it's phase-inconsistent with the render frame.</p>
+<table>
+  <tr><th>Cause</th><th>Fix</th></tr>
+  <tr><td>FreeD source not locked to house sync</td><td>Lock tracking system output to same sync reference as camera</td></tr>
+  <tr><td>Sync not reaching tracking computer</td><td>Verify tri-level or blackburst reaching the tracking workstation</td></tr>
+  <tr><td>FreeD packet rate ≠ camera frame rate</td><td>FreeD should output at 2× or exact frame rate (e.g., 48 Hz packets for 24 fps)</td></tr>
+  <tr><td>Mixed sync domains</td><td>Single sync master — everything downstream</td></tr>
+</table>
+
+<h2>Diagnosis Workflow</h2>
+<ol style="margin: 4px 0 4px 16px; padding: 0; color: {self.FG};">
+  <li>Lock off camera completely (sandbag the head)</li>
+  <li>Log raw FreeD UDP packets with Wireshark or a simple Python listener</li>
+  <li>Plot X/Y/Z and pan/tilt over 10 seconds at rest</li>
+  <li>If data is clean → jitter is in UE/LiveLink pipeline</li>
+  <li>If data is noisy → jitter is upstream (tracking HW or transport)</li>
+  <li>Check packet interval consistency — irregular timing = network/serial issue</li>
+  <li>Check value noise floor — random LSB flicker = encoder/IMU issue</li>
+</ol>
+        """)
+        layout.addWidget(doc)
 
     def _build_settings_tab(self, parent: QWidget):
         outer = QVBoxLayout(parent)
