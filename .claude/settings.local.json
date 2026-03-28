@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''freed_reader.py''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''freed_reader.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")",
+      "Bash(netstat -ano)",
+      "Bash(findstr \"UDP\")",
+      "Bash(findstr \"0.0.0.0\")",
+      "Bash(tasklist /FI \"PID eq 45688\" /FO LIST)",
+      "Bash(tasklist /FI \"PID eq 36376\" /FO LIST)",
+      "Bash(powershell -Command \"Get-Process -Id 45688,36376 | Select-Object Id,ProcessName,Path 2>&1\")",
+      "Bash(powershell -Command \"Get-NetUDPEndpoint | Where-Object {$_OwningProcess -eq 45688} | Select-Object LocalAddress,LocalPort | Sort-Object LocalPort\")",
+      "Bash(powershell -Command \"Get-Process -Name LiveLinkHub -ErrorAction SilentlyContinue | Select-Object Id; netstat -ano -p udp | Select-String ''45688''\")",
+      "Bash(powershell -Command \"Get-Process -Name LiveLinkHub -ErrorAction SilentlyContinue | ForEach-Object { Write-Host \\(''LiveLinkHub PID: '' + $_Id\\) }; netstat -ano | findstr /R ''UDP'' | findstr ''45000\\\\|40000\\\\|6000\\\\|6666\\\\|6667''\")",
+      "Bash(netstat -ano -p udp)",
+      "Bash(start python:*)",
+      "Bash(powershell -Command \"Get-Process -Id \\(netstat -ano -p udp | Select-String ''''40000'''' | ForEach-Object { \\($_split ''''\\\\s+''''\\)[-1] } | Select-Object -Unique\\) -ErrorAction SilentlyContinue | Select-Object Id,ProcessName\")",
+      "Bash(powershell -Command \"Get-Process -Id 37412,51920 -ErrorAction SilentlyContinue | Select-Object Id,ProcessName\")",
+      "Bash(ipconfig)",
+      "Bash(powershell -Command \"Get-Process -Name LiveLinkHub -ErrorAction SilentlyContinue | Select-Object Id,ProcessName\")",
+      "Bash(python -c \":*)"
+    ]
+  }
+}
