@@ -637,70 +637,156 @@ class OpenTrackIOSimulator(QMainWindow):
     def _build_timing_tab(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
-        lay.setContentsMargins(12, 12, 12, 12)
-        lay.setSpacing(10)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(16)
 
-        # Frame rate
-        gb_fps, gb_fps_lay = self._group('Frame Rate')
+        # ── Frame Rate ────────────────────────────────────────────────────
+        gb_fps = QGroupBox('Frame Rate')
+        gb_fps_lay = QVBoxLayout(gb_fps)
+        gb_fps_lay.setContentsMargins(14, 16, 14, 14)
+        gb_fps_lay.setSpacing(12)
+
         self._combo_fps = QComboBox()
         for fps in ['23.976', '24', '25', '29.97', '30', '48', '50', '59.94', '60']:
             self._combo_fps.addItem(fps)
         self._combo_fps.setCurrentText('25')
-        self._combo_fps.setFixedWidth(140)
-        self._spin_fps_num   = self._intbox(1, 240, 25, '', 80)
-        self._spin_fps_denom = self._intbox(1, 1001, 1, '', 80)
-        note = QLabel('Quick select:'); note.setObjectName('dim')
+        self._combo_fps.setFixedWidth(160)
         self._combo_fps.currentTextChanged.connect(self._on_fps_preset)
-        fps_row = QWidget(); fps_rl = QHBoxLayout(fps_row); fps_rl.setContentsMargins(0,0,0,0); fps_rl.setSpacing(8)
-        fps_rl.addWidget(note); fps_rl.addWidget(self._combo_fps); fps_rl.addStretch()
-        manual_row = QWidget(); mr_l = QHBoxLayout(manual_row); mr_l.setContentsMargins(0,0,0,0); mr_l.setSpacing(8)
-        mn = QLabel('Manual num/denom:'); mn.setObjectName('dim'); mn.setFixedWidth(150)
-        slash = QLabel('/'); slash.setObjectName('dim')
-        mr_l.addWidget(mn); mr_l.addWidget(self._spin_fps_num); mr_l.addWidget(slash); mr_l.addWidget(self._spin_fps_denom); mr_l.addStretch()
-        gb_fps_lay.addWidget(fps_row)
+
+        preset_row = QWidget()
+        pr_l = QHBoxLayout(preset_row)
+        pr_l.setContentsMargins(0, 0, 0, 0)
+        pr_l.setSpacing(12)
+        pr_lbl = QLabel('Quick select:')
+        pr_lbl.setObjectName('dim')
+        pr_lbl.setFixedWidth(120)
+        pr_l.addWidget(pr_lbl)
+        pr_l.addWidget(self._combo_fps)
+        pr_l.addStretch()
+        gb_fps_lay.addWidget(preset_row)
+
+        self._spin_fps_num   = self._intbox(1, 240,  25, '', 90)
+        self._spin_fps_denom = self._intbox(1, 1001,  1, '', 90)
+
+        manual_row = QWidget()
+        mr_l = QHBoxLayout(manual_row)
+        mr_l.setContentsMargins(0, 0, 0, 0)
+        mr_l.setSpacing(10)
+        mr_lbl = QLabel('Manual (num / denom):')
+        mr_lbl.setObjectName('dim')
+        mr_lbl.setFixedWidth(160)
+        slash = QLabel('/')
+        slash.setObjectName('dim')
+        mr_l.addWidget(mr_lbl)
+        mr_l.addWidget(self._spin_fps_num)
+        mr_l.addWidget(slash)
+        mr_l.addWidget(self._spin_fps_denom)
+        mr_l.addStretch()
         gb_fps_lay.addWidget(manual_row)
+
         lay.addWidget(gb_fps)
 
-        # Timecode
-        gb_tc, gb_tc_lay = self._group('Timecode')
+        # ── Timecode ──────────────────────────────────────────────────────
+        gb_tc = QGroupBox('Timecode')
+        gb_tc_lay = QVBoxLayout(gb_tc)
+        gb_tc_lay.setContentsMargins(14, 16, 14, 14)
+        gb_tc_lay.setSpacing(12)
+
         self._combo_tc_source = QComboBox()
         self._combo_tc_source.addItems(['System clock', 'Manual'])
         self._combo_tc_source.setFixedWidth(160)
         self._combo_tc_source.currentIndexChanged.connect(self._on_tc_source_changed)
-        tc_src_row = QWidget(); tc_src_l = QHBoxLayout(tc_src_row); tc_src_l.setContentsMargins(0,0,0,0); tc_src_l.setSpacing(8)
-        tc_lbl = QLabel('Source:'); tc_lbl.setObjectName('dim'); tc_lbl.setFixedWidth(80)
-        tc_src_l.addWidget(tc_lbl); tc_src_l.addWidget(self._combo_tc_source); tc_src_l.addStretch()
-        gb_tc_lay.addWidget(tc_src_row)
-        manual_tc = QWidget(); mtc_l = QHBoxLayout(manual_tc); mtc_l.setContentsMargins(0,0,0,0); mtc_l.setSpacing(6)
-        self._spin_tc_h = self._intbox(0, 23,  0, '', 64)
-        self._spin_tc_m = self._intbox(0, 59,  0, '', 64)
-        self._spin_tc_s = self._intbox(0, 59,  0, '', 64)
-        self._spin_tc_f = self._intbox(0, 119, 0, '', 64)
-        for sb, lbl_txt in zip(
+
+        src_row = QWidget()
+        src_l = QHBoxLayout(src_row)
+        src_l.setContentsMargins(0, 0, 0, 0)
+        src_l.setSpacing(12)
+        src_lbl = QLabel('Source:')
+        src_lbl.setObjectName('dim')
+        src_lbl.setFixedWidth(120)
+        src_l.addWidget(src_lbl)
+        src_l.addWidget(self._combo_tc_source)
+        src_l.addStretch()
+        gb_tc_lay.addWidget(src_row)
+
+        # HH : MM : SS : FF row with column labels
+        self._spin_tc_h = self._intbox(0,  23, 0, '', 72)
+        self._spin_tc_m = self._intbox(0,  59, 0, '', 72)
+        self._spin_tc_s = self._intbox(0,  59, 0, '', 72)
+        self._spin_tc_f = self._intbox(0, 119, 0, '', 72)
+
+        tc_row = QWidget()
+        tc_l = QHBoxLayout(tc_row)
+        tc_l.setContentsMargins(0, 0, 0, 0)
+        tc_l.setSpacing(0)
+
+        tc_pad = QLabel('')
+        tc_pad.setFixedWidth(120)
+        tc_l.addWidget(tc_pad)
+
+        for i, (sb, title) in enumerate(zip(
             [self._spin_tc_h, self._spin_tc_m, self._spin_tc_s, self._spin_tc_f],
-            ['HH', 'MM', 'SS', 'FF']
-        ):
+            ['Hours', 'Minutes', 'Seconds', 'Frames']
+        )):
             sb.setEnabled(False)
-            col = QWidget(); cl = QVBoxLayout(col); cl.setContentsMargins(0,0,0,0); cl.setSpacing(2)
-            hdr = QLabel(lbl_txt); hdr.setObjectName('dim'); hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            cl.addWidget(hdr); cl.addWidget(sb)
-            mtc_l.addWidget(col)
-        mtc_l.addStretch()
-        gb_tc_lay.addWidget(manual_tc)
-        self._chk_df = QCheckBox('Drop frame (29.97 / 59.94)')
+            col = QWidget()
+            col_l = QVBoxLayout(col)
+            col_l.setContentsMargins(4, 0, 4, 0)
+            col_l.setSpacing(4)
+            hdr = QLabel(title)
+            hdr.setObjectName('dim')
+            hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            hdr.setFixedWidth(80)
+            sb.setFixedWidth(72)
+            col_l.addWidget(hdr)
+            col_l.addWidget(sb)
+            tc_l.addWidget(col)
+            if i < 3:
+                sep = QLabel(':')
+                sep.setObjectName('dim')
+                sep.setAlignment(Qt.AlignmentFlag.AlignBottom)
+                sep.setContentsMargins(0, 0, 0, 6)
+                tc_l.addWidget(sep)
+
+        tc_l.addStretch()
+        gb_tc_lay.addWidget(tc_row)
+
+        self._chk_df = QCheckBox('Drop frame  (use with 29.97 / 59.94 fps)')
         self._chk_df.setChecked(False)
         gb_tc_lay.addWidget(self._chk_df)
+
         lay.addWidget(gb_tc)
 
-        # Timing mode
-        gb_mode, gb_mode_lay = self._group('Timing Mode')
+        # ── Timing Mode ───────────────────────────────────────────────────
+        gb_mode = QGroupBox('Timing Mode')
+        gb_mode_lay = QVBoxLayout(gb_mode)
+        gb_mode_lay.setContentsMargins(14, 16, 14, 14)
+        gb_mode_lay.setSpacing(12)
+
         self._combo_timing_mode = QComboBox()
         self._combo_timing_mode.addItems(['external', 'internal'])
         self._combo_timing_mode.setFixedWidth(160)
-        mode_row = QWidget(); mode_rl = QHBoxLayout(mode_row); mode_rl.setContentsMargins(0,0,0,0); mode_rl.setSpacing(8)
-        mode_lbl = QLabel('Mode:'); mode_lbl.setObjectName('dim'); mode_lbl.setFixedWidth(80)
-        mode_rl.addWidget(mode_lbl); mode_rl.addWidget(self._combo_timing_mode); mode_rl.addStretch()
+
+        mode_note = QLabel(
+            'external — sample timestamps driven by an external sync source (genlock, LTC).\n'
+            'internal — device uses its own clock.'
+        )
+        mode_note.setObjectName('dim')
+        mode_note.setWordWrap(True)
+
+        mode_row = QWidget()
+        mode_l = QHBoxLayout(mode_row)
+        mode_l.setContentsMargins(0, 0, 0, 0)
+        mode_l.setSpacing(12)
+        mode_lbl = QLabel('Mode:')
+        mode_lbl.setObjectName('dim')
+        mode_lbl.setFixedWidth(120)
+        mode_l.addWidget(mode_lbl)
+        mode_l.addWidget(self._combo_timing_mode)
+        mode_l.addStretch()
+
         gb_mode_lay.addWidget(mode_row)
+        gb_mode_lay.addWidget(mode_note)
         lay.addWidget(gb_mode)
 
         lay.addStretch()
