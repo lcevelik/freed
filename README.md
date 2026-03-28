@@ -2,7 +2,7 @@
 
 A PyQt6 dark-theme GUI application for receiving, parsing, and analysing camera tracking data from the **FreeD (D1) protocol** over UDP.
 
-![Version](https://img.shields.io/badge/version-v1.1-orange) ![Python](https://img.shields.io/badge/Python-3.8%2B-blue) ![PyQt6](https://img.shields.io/badge/PyQt6-6.x-green) ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
+![Version](https://img.shields.io/badge/version-v1.9-orange) ![Python](https://img.shields.io/badge/Python-3.8%2B-blue) ![PyQt6](https://img.shields.io/badge/PyQt6-6.x-green) ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
 
 ---
 
@@ -12,12 +12,14 @@ A PyQt6 dark-theme GUI application for receiving, parsing, and analysing camera 
 - Apple-dark PyQt6 GUI with four tabs:
   - **Dashboard** — live rotation, position, lens, genlock, timecode, and status
   - **Packet Map** — byte-by-byte protocol breakdown with decoded values
-  - **Jitter** — inter-packet timing analysis with live graphs and stats
-  - **Settings** — configure UDP port without restarting the app
-- Validates XOR checksums (configurable ignore mode)
+  - **Jitter** — timing health banner, numeric noise monitoring, and full reference guide
+  - **Settings** — configure UDP port, destinations, frame rate, and OpenTrackIO output
+- Correct checksum validation — device-verified formula `(byte26 + byte27 + byte28) & 0xFF == 0xF6`
 - Parses 29-byte FreeD D1 packets with unit conversion (degrees, meters, mm)
 - Timecode decoding from spare bytes (24 fps default)
 - Genlock phase detection and lock status
+- **OpenTrackIO v1.0.1** output — forwards tracking data as JSON over UDP
+- Settings persist across restarts via `%APPDATA%\FreeDReader\`
 - Standalone `.exe` build via PyInstaller (no Python required on target)
 - Included **FreeD Simulator** for development and testing without real hardware
 
@@ -31,16 +33,15 @@ A PyQt6 dark-theme GUI application for receiving, parsing, and analysing camera 
 |---------|---------|
 | Python  | 3.8+    |
 | PyQt6   | 6.x     |
-| pyqtgraph | 0.14+ |
 | numpy   | 1.x / 2.x |
 
 ```bash
-pip install PyQt6 pyqtgraph numpy
+pip install PyQt6 numpy
 ```
 
 ### Running the portable executable
 
-No dependencies — copy `dist\FreeDReader.exe` to any Windows machine and run it.
+No dependencies — copy `dist\FreeDReader_v1.9.exe` to any Windows machine and run it.
 
 ---
 
@@ -98,22 +99,37 @@ Table showing every byte of the latest packet — hex, field name, raw value, an
 
 ### Jitter
 
-Inter-packet timing analysis updated at 10 Hz:
+Inter-packet timing analysis updated at 10 Hz, split into two sub-tabs:
 
-| Stat | Description |
-|------|-------------|
-| Mean | Average interval (ms) |
-| Std Dev | Standard deviation — classic jitter measure |
-| Min / Max | Fastest and slowest intervals seen |
-| Peak ± | Maximum deviation from mean |
-| RFC Jitter | RFC 3550-style running jitter accumulator |
+**Monitor**
 
-- **Line graph** — rolling last 200 intervals with mean reference line
-- **Histogram** — distribution of last 500 intervals in 30 bins
+| Section | Stats |
+|---------|-------|
+| Timing | Mean interval, Std Dev, Min/Max, Peak ±, RFC 3550 jitter — all with colour-coded health LED |
+| Position Noise | X, Y, Z standard deviation in mm (rolling 500-packet window) |
+| Rotation Noise | Pan, Tilt, Roll standard deviation in degrees (rolling 500-packet window) |
+
+Health LED thresholds:
+
+| Colour | Timing | Position | Rotation |
+|--------|--------|----------|----------|
+| Green (IDEAL) | < 1 ms | < 0.1 mm | < 0.01° |
+| Yellow (ACCEPTABLE) | < 3 ms | < 0.5 mm | < 0.05° |
+| Orange (MARGINAL) | < 5 ms | < 1.0 mm | < 0.10° |
+| Red (PROBLEMATIC) | ≥ 5 ms | ≥ 1.0 mm | ≥ 0.10° |
+
+**Reference**
+
+Scrollable in-app documentation covering what each metric means, common causes of poor jitter, and how to fix them.
 
 ### Settings
 
-Change the UDP listen port at runtime without restarting. Hit **Apply** to rebind the receiver to the new port. The Dashboard status bar updates automatically.
+- Change the UDP listen port at runtime — hit **Apply** to rebind without restarting
+- Add / remove forwarding destinations (IP + port)
+- Configure timecode frame rate
+- Enable **OpenTrackIO** output with custom IP, port, and subject name
+
+All settings are saved automatically to `%APPDATA%\FreeDReader\freed_forwarder_config.json` and restored on next launch.
 
 ---
 
@@ -134,26 +150,39 @@ Change the UDP listen port at runtime without restarting. Hit **Apply** to rebin
 | 20–22 | Zoom | ÷ 1000 | mm focal length |
 | 23–25 | Focus | ÷ 1000 | meters |
 | 26–27 | Spare / Genlock | upper nibble = phase | timecode / genlock |
-| 28 | Checksum | XOR bytes 0–27 | — |
+| 28 | Checksum | `(byte26 + byte27 + byte28) & 0xFF == 0xF6` | — |
+
+> **Checksum note:** The device uses a spare-byte complement scheme, not a standard XOR. The formula was determined by live packet capture and verified across 200+ packets.
+
+Optional 4-byte extension (bytes 29–32): full H:M:S:F timecode block, injected by the forwarder when timecode injection is enabled.
+
+---
+
+## Project Structure
+
+```
+freed/
+├── freed_reader.py        # Main GUI application + forwarder
+├── protocol.py            # FreeDParser, FreeDReceiver, FreeDReceiverGUI
+├── opentrackio.py         # OpenTrackIOSender (JSON over UDP, v1.0.1)
+├── freed_simulator.py     # Test packet generator
+├── tests/
+│   └── test_freed.py      # 48 unit tests
+├── FreeDReader_v1.9.spec  # PyInstaller build spec
+└── dist/
+    └── FreeDReader_v1.9.exe  # Standalone executable
+```
 
 ---
 
 ## Building the Executable
 
-Requires PyInstaller:
-
 ```bash
 pip install pyinstaller
-python -m PyInstaller --onefile --name FreeDReader --noconsole freed_reader.py
+pyinstaller FreeDReader_v1.9.spec
 ```
 
-Output: `dist\FreeDReader.exe` (~50 MB, fully self-contained)
-
-Or use the included batch file:
-
-```
-BUILD_EXECUTABLE.bat
-```
+Output: `dist\FreeDReader_v1.9.exe` (~50 MB, fully self-contained, no Python required)
 
 ---
 
@@ -162,58 +191,73 @@ BUILD_EXECUTABLE.bat
 **No packets received**
 - Verify the FreeD source is targeting the correct IP and port (default 45000)
 - Check Windows Firewall allows inbound UDP on the configured port
-- Ensure no other app is bound to the same port
+- Ensure no other app is bound to the same port (close FreeDReader before running diagnostic scripts)
 
 **Wrong port**
 - Open the **Settings** tab, enter the correct port, and click **Apply**
 
-**Checksum errors**
-- Checksum validation is ignored by default — data is always displayed
-- Verify the source uses FreeD D1 format (0xD1 message type, 29-byte packets)
+**Checksum shows MISMATCH**
+- Upgrade to v1.9 — earlier versions used an incorrect XOR algorithm. v1.9 uses the correct device-verified formula.
 
----
+**High jitter (10 ms+)**
+- Windows timer resolution: v1.9 sets 1 ms resolution at startup automatically
+- If jitter persists, it is likely genuine source or network jitter — check the Jitter → Reference tab for diagnosis guidance
 
-## Project Structure
-
-```
-freed/
-├── freed_reader.py        # Main GUI application
-├── freed_simulator.py     # Test packet generator
-├── run_gui.bat            # Quick launcher (double-click)
-├── BUILD_EXECUTABLE.bat   # PyInstaller build script
-└── dist/
-    └── FreeDReader.exe    # Standalone executable
-```
+**Settings not saving**
+- Ensure the app has write access to `%APPDATA%\FreeDReader\`
+- Upgrade to v1.6+ — earlier versions stored config next to the EXE which could fail on restricted paths
 
 ---
 
 ## Changelog
 
-### v1.1 — 2026-03-27
+### v1.9 — 2026-03-28
+
+**Bug fixes**
+
+- **Fixed checksum algorithm** — live packet capture revealed the device uses `(byte26 + byte27 + byte28) & 0xFF == 0xF6`, not XOR of bytes 0–27. Checksum now shows OK on every valid packet.
+- **Windows timer resolution** — `timeBeginPeriod(1)` called at startup sets 1 ms OS scheduler tick, eliminating the 15.6 ms Windows default timer noise from jitter measurements.
 
 **New features**
 
-- **Jitter tab** — dedicated inter-packet timing analysis panel:
-  - Six real-time stats: Mean, Std Dev, Min, Max, Peak ±, and RFC 3550 jitter
-  - Rolling line graph of the last 200 packet intervals with a mean reference line
-  - Interval distribution histogram over the last 500 packets (30 bins)
-  - Powered by pyqtgraph and numpy for smooth, low-overhead rendering
-- **Settings tab** — configure the UDP listen port at runtime:
-  - Spinbox (range 1024–65535, default 45000) with an Apply button
-  - Receiver restarts on the new port without closing the app
-  - Dashboard port label updates automatically on Apply
-- **run_gui.bat** — double-click launcher for quick startup without a terminal
+- **Position noise monitoring** — rolling 500-packet standard deviation for X, Y, Z displayed in mm with colour-coded health LED
+- **Rotation noise monitoring** — rolling 500-packet standard deviation for Pan, Tilt, Roll displayed in degrees with colour-coded health LED
+- Jitter graphs removed in favour of pure numeric display — cleaner and more precise
 
-**Improvements**
+---
 
-- Added `PYQTGRAPH_QT_LIB=PyQt6` environment hint to prevent Qt binding conflicts when both PyQt5 and PyQt6 are installed
-- `window.raise_()` and `window.activateWindow()` ensure the window comes to front on launch
-- README fully rewritten with tab documentation, packet structure table, jitter metric descriptions, troubleshooting, and build instructions
+### v1.8 — 2026-03-27
 
-**Dependencies added**
+- Added **Jitter Reference** sub-tab — scrollable in-app documentation covering all metrics, causes of poor signal quality, and remediation steps
 
-- `pyqtgraph >= 0.14`
-- `numpy >= 1.x`
+---
+
+### v1.7 — 2026-03-27
+
+- Added **jitter health banner** with colour-coded LED indicators (IDEAL / ACCEPTABLE / MARGINAL / PROBLEMATIC) for all timing, position, and rotation metrics
+
+---
+
+### v1.6 — 2026-03-27
+
+- Settings now stored in `%APPDATA%\FreeDReader\` — survive EXE moves, reinstalls, and restricted install paths
+- All settings (listen port, destinations, frame rate, OpenTrackIO config) persist correctly across app restarts
+
+---
+
+### v1.4–v1.5 — 2026-03-27
+
+- Codebase split into `protocol.py` (parser + receiver) and `opentrackio.py` (OpenTrackIO sender) for maintainability
+- OpenTrackIO sequence number fix — was double-incrementing per send; now increments once
+- 48 unit tests covering parser, packet builder, checksum, interpolation, forwarder config, TC injection, and OpenTrackIO output
+
+---
+
+### v1.1–v1.3 — 2026-03-27
+
+- **Jitter tab** — inter-packet timing analysis with RFC 3550 jitter, std dev, min/max, peak
+- **Settings tab** — runtime UDP port change without app restart
+- Listen port persists across restarts
 
 ---
 
@@ -222,7 +266,7 @@ freed/
 - PyQt6 dark-theme GUI dashboard
 - Dashboard tab: rotation, position, lens, genlock, timecode, status, raw packet
 - Packet Map tab: byte-by-byte protocol breakdown
-- FreeD D1 packet parser with XOR checksum validation
+- FreeD D1 packet parser with checksum validation
 - UDP receiver with 10 Hz UI update loop
 - FreeD Simulator for testing without real hardware
 - Standalone `.exe` via PyInstaller
