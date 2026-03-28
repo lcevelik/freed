@@ -8,7 +8,7 @@ Author  : Libor Cevelik
 Copyright (c) 2026 Libor Cevelik. All rights reserved.
 """
 
-__version__   = 'v1.8'
+__version__   = 'v1.9'
 __author__    = 'Libor Cevelik'
 __copyright__ = 'Copyright (c) 2026 Libor Cevelik'
 
@@ -938,67 +938,73 @@ class FreeDDashboard(QMainWindow):
 
         layout.addWidget(stats_row)
 
-        # ── Line graph: interval over time ────────────────────────────
-        line_card = QFrame()
-        line_card.setObjectName('card')
-        line_vbox = QVBoxLayout(line_card)
-        line_vbox.setContentsMargins(10, 8, 10, 10)
-        line_vbox.setSpacing(4)
+        # ── Position noise ────────────────────────────────────────────
+        pos_frame = QFrame(); pos_frame.setObjectName('card')
+        pos_outer = QVBoxLayout(pos_frame)
+        pos_outer.setContentsMargins(14, 10, 14, 12); pos_outer.setSpacing(6)
+        pos_title = QLabel('POSITION NOISE  (std dev over last 500 packets)   ● ideal <0.1mm   ● accept <0.5mm   ● problem >1mm')
+        pos_title.setFont(QFont(_FONT_SANS, 9, QFont.Weight.Bold))
+        pos_title.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+        pos_outer.addWidget(pos_title)
 
-        line_hdr = QLabel('PACKET INTERVAL OVER TIME  (last 200 packets)   — dashed lines: 1ms ideal / 3ms acceptable / 5ms problematic')
-        line_hdr.setFont(QFont(_FONT_SANS, 9, QFont.Weight.Bold))
-        line_hdr.setStyleSheet(f'color: {self.DIM}; background: transparent;')
-        line_vbox.addWidget(line_hdr)
+        pos_row = QWidget(); pos_row.setStyleSheet('background: transparent;')
+        pos_row_l = QHBoxLayout(pos_row); pos_row_l.setContentsMargins(0,0,0,0); pos_row_l.setSpacing(10)
+        self._noise_pos_labels = {}
+        for axis in ('X', 'Y', 'Z'):
+            f = QFrame(); f.setObjectName('card')
+            vb = QVBoxLayout(f); vb.setContentsMargins(10,8,10,10); vb.setSpacing(2)
+            lt = QLabel(axis)
+            lt.setFont(QFont(_FONT_SANS, 9, QFont.Weight.Bold))
+            lt.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+            lt.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lv = QLabel('---')
+            lv.setFont(QFont(_FONT_MONO, 14, QFont.Weight.Bold))
+            lv.setStyleSheet(f'color: {self.FG}; background: transparent;')
+            lv.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            ls = QLabel('mm std dev')
+            ls.setFont(QFont(_FONT_SANS, 8))
+            ls.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+            ls.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            vb.addWidget(lt); vb.addWidget(lv); vb.addWidget(ls)
+            pos_row_l.addWidget(f)
+            self._noise_pos_labels[axis] = lv
+        pos_outer.addWidget(pos_row)
+        layout.addWidget(pos_frame)
 
-        self._jitter_plot = pg.PlotWidget()
-        self._jitter_plot.setBackground(self.CARD)
-        for axis in ('left', 'bottom'):
-            self._jitter_plot.getAxis(axis).setPen(pg.mkPen(self.BORDER))
-            self._jitter_plot.getAxis(axis).setTextPen(pg.mkPen(self.DIM))
-        self._jitter_plot.showGrid(x=False, y=True, alpha=0.15)
-        self._jitter_plot.setLabel('left',   'ms', color=self.DIM)
-        self._jitter_plot.setLabel('bottom', 'packet #', color=self.DIM)
-        self._jitter_curve = self._jitter_plot.plot(
-            pen=pg.mkPen(color=self.CYAN, width=1.5))
-        self._jitter_mean_line = pg.InfiniteLine(
-            angle=0, pen=pg.mkPen(color=self.GREEN, style=Qt.PenStyle.DashLine, width=1))
-        self._jitter_plot.addItem(self._jitter_mean_line)
-        # Threshold reference lines
-        for ms, color in [(1.0, self.GREEN), (3.0, self.YELLOW), (5.0, self.RED)]:
-            line = pg.InfiniteLine(
-                pos=ms, angle=0,
-                pen=pg.mkPen(color=color, style=Qt.PenStyle.DotLine, width=1))
-            self._jitter_plot.addItem(line)
-        line_vbox.addWidget(self._jitter_plot)
-        layout.addWidget(line_card, stretch=3)
+        # ── Rotation noise ────────────────────────────────────────────
+        rot_frame = QFrame(); rot_frame.setObjectName('card')
+        rot_outer = QVBoxLayout(rot_frame)
+        rot_outer.setContentsMargins(14, 10, 14, 12); rot_outer.setSpacing(6)
+        rot_title = QLabel('ROTATION NOISE  (std dev over last 500 packets)   ● ideal <0.01°   ● accept <0.05°   ● problem >0.1°')
+        rot_title.setFont(QFont(_FONT_SANS, 9, QFont.Weight.Bold))
+        rot_title.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+        rot_outer.addWidget(rot_title)
 
-        # ── Histogram: interval distribution ─────────────────────────
-        hist_card = QFrame()
-        hist_card.setObjectName('card')
-        hist_vbox = QVBoxLayout(hist_card)
-        hist_vbox.setContentsMargins(10, 8, 10, 10)
-        hist_vbox.setSpacing(4)
+        rot_row = QWidget(); rot_row.setStyleSheet('background: transparent;')
+        rot_row_l = QHBoxLayout(rot_row); rot_row_l.setContentsMargins(0,0,0,0); rot_row_l.setSpacing(10)
+        self._noise_rot_labels = {}
+        for axis in ('Pan', 'Tilt', 'Roll'):
+            f = QFrame(); f.setObjectName('card')
+            vb = QVBoxLayout(f); vb.setContentsMargins(10,8,10,10); vb.setSpacing(2)
+            lt = QLabel(axis)
+            lt.setFont(QFont(_FONT_SANS, 9, QFont.Weight.Bold))
+            lt.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+            lt.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lv = QLabel('---')
+            lv.setFont(QFont(_FONT_MONO, 14, QFont.Weight.Bold))
+            lv.setStyleSheet(f'color: {self.FG}; background: transparent;')
+            lv.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            ls = QLabel('° std dev')
+            ls.setFont(QFont(_FONT_SANS, 8))
+            ls.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+            ls.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            vb.addWidget(lt); vb.addWidget(lv); vb.addWidget(ls)
+            rot_row_l.addWidget(f)
+            self._noise_rot_labels[axis] = lv
+        rot_outer.addWidget(rot_row)
+        layout.addWidget(rot_frame)
 
-        hist_hdr = QLabel('INTERVAL DISTRIBUTION  (last 500 packets)')
-        hist_hdr.setFont(QFont(_FONT_SANS, 9, QFont.Weight.Bold))
-        hist_hdr.setStyleSheet(f'color: {self.DIM}; background: transparent;')
-        hist_vbox.addWidget(hist_hdr)
-
-        self._hist_plot = pg.PlotWidget()
-        self._hist_plot.setBackground(self.CARD)
-        for axis in ('left', 'bottom'):
-            self._hist_plot.getAxis(axis).setPen(pg.mkPen(self.BORDER))
-            self._hist_plot.getAxis(axis).setTextPen(pg.mkPen(self.DIM))
-        self._hist_plot.showGrid(x=False, y=True, alpha=0.15)
-        self._hist_plot.setLabel('left',   'count',  color=self.DIM)
-        self._hist_plot.setLabel('bottom', 'ms',     color=self.DIM)
-        self._hist_bars = pg.BarGraphItem(
-            x=[], height=[], width=1,
-            brush=pg.mkBrush(self.ORANGE),
-            pen=pg.mkPen(self.BORDER))
-        self._hist_plot.addItem(self._hist_bars)
-        hist_vbox.addWidget(self._hist_plot)
-        layout.addWidget(hist_card, stretch=2)
+        layout.addStretch()
 
     def _build_jitter_reference(self, parent: QWidget):
         layout = QVBoxLayout(parent)
@@ -2009,16 +2015,41 @@ class FreeDDashboard(QMainWindow):
         self._jitter_stat_labels['RFC JITTER'].setStyleSheet(
             f'color: {health_color}; background: transparent;')
 
-        # Line graph — last 200 samples
-        recent = arr[-200:] if n >= 200 else arr
-        self._jitter_curve.setData(recent.tolist())
-        self._jitter_mean_line.setValue(mean)
+        # ── Position noise ─────────────────────────────────────────────
+        pos_scale_mm = r.position_scale   # 1/64 → mm
+        for axis, hist in (('X', r._x_history), ('Y', r._y_history), ('Z', r._z_history)):
+            lbl = self._noise_pos_labels[axis]
+            if len(hist) < 10:
+                lbl.setText('…')
+                lbl.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+                continue
+            std_mm = float(np.std(np.array(hist, dtype=np.float64))) * pos_scale_mm
+            if std_mm < 0.1:
+                c = self.GREEN
+            elif std_mm < 0.5:
+                c = self.YELLOW
+            else:
+                c = self.RED
+            lbl.setText(f'{std_mm:.3f}')
+            lbl.setStyleSheet(f'color: {c}; background: transparent;')
 
-        # Histogram — all 500 samples, 30 bins
-        counts, edges = np.histogram(arr, bins=min(30, n))
-        centers = ((edges[:-1] + edges[1:]) / 2).tolist()
-        width   = float(edges[1] - edges[0]) * 0.85
-        self._hist_bars.setOpts(x=centers, height=counts.tolist(), width=width)
+        # ── Rotation noise ─────────────────────────────────────────────
+        rot_scale = r.rotation_scale   # 1/32768 → degrees
+        for axis, hist in (('Pan', r._pan_history), ('Tilt', r._tilt_history), ('Roll', r._roll_history)):
+            lbl = self._noise_rot_labels[axis]
+            if len(hist) < 10:
+                lbl.setText('…')
+                lbl.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+                continue
+            std_deg = float(np.std(np.array(hist, dtype=np.float64))) * rot_scale
+            if std_deg < 0.01:
+                c = self.GREEN
+            elif std_deg < 0.05:
+                c = self.YELLOW
+            else:
+                c = self.RED
+            lbl.setText(f'{std_deg:.4f}')
+            lbl.setStyleSheet(f'color: {c}; background: transparent;')
 
     # ------------------------------------------------------------------
     # Close

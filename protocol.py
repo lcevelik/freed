@@ -473,6 +473,14 @@ class FreeDReceiverGUI(FreeDReceiver):
         self._jitter_history   = deque(maxlen=500)  # long history for jitter tab
         self._rfc_jitter       = 0.0                # RFC 3550-style jitter accumulator
         self._prev_interval    = None               # previous interval for RFC diff
+        # Position noise history (raw values — convert with position_scale / 1000 for metres)
+        self._x_history        = deque(maxlen=500)
+        self._y_history        = deque(maxlen=500)
+        self._z_history        = deque(maxlen=500)
+        # Rotation noise history (raw values — convert with rotation_scale for degrees)
+        self._pan_history      = deque(maxlen=500)
+        self._tilt_history     = deque(maxlen=500)
+        self._roll_history     = deque(maxlen=500)
         self.on_packet         = None               # optional callback(raw_bytes)
         self.on_packet_parsed  = None               # optional callback(data_dict)
 
@@ -485,6 +493,8 @@ class FreeDReceiverGUI(FreeDReceiver):
                 self._interval_history.clear()
                 self._gl_phase_history.clear()
                 self._jitter_history.clear()
+                self._x_history.clear(); self._y_history.clear(); self._z_history.clear()
+                self._pan_history.clear(); self._tilt_history.clear(); self._roll_history.clear()
                 self._rfc_jitter    = 0.0
                 self._prev_interval = None
             else:
@@ -498,6 +508,14 @@ class FreeDReceiverGUI(FreeDReceiver):
                     self._rfc_jitter += (d - self._rfc_jitter) / 16.0
                 self._prev_interval = interval
         self._last_packet_time = now
+        # Track position and rotation for noise/jitter analysis
+        pos = data.get('position', {})
+        self._x_history.append(pos.get('x', 0))
+        self._y_history.append(pos.get('y', 0))
+        self._z_history.append(pos.get('z', 0))
+        self._pan_history.append(data.get('pan', 0))
+        self._tilt_history.append(data.get('tilt', 0))
+        self._roll_history.append(data.get('roll', 0))
         # Track genlock phase counter (upper nibble of byte 26)
         rb = data.get('raw_bytes')
         if rb and len(rb) > 26:
