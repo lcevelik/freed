@@ -1,0 +1,19 @@
+{
+  "destinations": [
+    {
+      "ip": "127.0.0.1",
+      "port": 40000,
+      "enabled": false,
+      "permanent": true
+    }
+  ],
+  "tc_inject": true,
+  "tc_source": "bluefish",
+  "tc_fps": 24.0,
+  "ltc_connector": 2,
+  "oti_enabled": true,
+  "oti_ip": "127.0.0.1",
+  "oti_port": 55555,
+  "oti_subject": "Camera",
+  "oti_source_id": "16c59ded-4a5a-4464-92e0-d5b7b2dbd0ec"
+}
