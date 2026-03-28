@@ -695,66 +695,12 @@ class OpenTrackIOSimulator(QMainWindow):
         gb_tc = QGroupBox('Timecode')
         gb_tc_lay = QVBoxLayout(gb_tc)
         gb_tc_lay.setContentsMargins(14, 16, 14, 14)
-        gb_tc_lay.setSpacing(12)
+        gb_tc_lay.setSpacing(10)
 
-        self._combo_tc_source = QComboBox()
-        self._combo_tc_source.addItems(['System clock', 'Manual'])
-        self._combo_tc_source.setFixedWidth(160)
-        self._combo_tc_source.currentIndexChanged.connect(self._on_tc_source_changed)
-
-        src_row = QWidget()
-        src_l = QHBoxLayout(src_row)
-        src_l.setContentsMargins(0, 0, 0, 0)
-        src_l.setSpacing(12)
-        src_lbl = QLabel('Source:')
-        src_lbl.setObjectName('dim')
-        src_lbl.setFixedWidth(120)
-        src_l.addWidget(src_lbl)
-        src_l.addWidget(self._combo_tc_source)
-        src_l.addStretch()
-        gb_tc_lay.addWidget(src_row)
-
-        # HH : MM : SS : FF row with column labels
-        self._spin_tc_h = self._intbox(0,  23, 0, '', 72)
-        self._spin_tc_m = self._intbox(0,  59, 0, '', 72)
-        self._spin_tc_s = self._intbox(0,  59, 0, '', 72)
-        self._spin_tc_f = self._intbox(0, 119, 0, '', 72)
-
-        tc_row = QWidget()
-        tc_l = QHBoxLayout(tc_row)
-        tc_l.setContentsMargins(0, 0, 0, 0)
-        tc_l.setSpacing(0)
-
-        tc_pad = QLabel('')
-        tc_pad.setFixedWidth(120)
-        tc_l.addWidget(tc_pad)
-
-        for i, (sb, title) in enumerate(zip(
-            [self._spin_tc_h, self._spin_tc_m, self._spin_tc_s, self._spin_tc_f],
-            ['Hours', 'Minutes', 'Seconds', 'Frames']
-        )):
-            sb.setEnabled(False)
-            col = QWidget()
-            col_l = QVBoxLayout(col)
-            col_l.setContentsMargins(4, 0, 4, 0)
-            col_l.setSpacing(4)
-            hdr = QLabel(title)
-            hdr.setObjectName('dim')
-            hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            hdr.setFixedWidth(80)
-            sb.setFixedWidth(72)
-            col_l.addWidget(hdr)
-            col_l.addWidget(sb)
-            tc_l.addWidget(col)
-            if i < 3:
-                sep = QLabel(':')
-                sep.setObjectName('dim')
-                sep.setAlignment(Qt.AlignmentFlag.AlignBottom)
-                sep.setContentsMargins(0, 0, 0, 6)
-                tc_l.addWidget(sep)
-
-        tc_l.addStretch()
-        gb_tc_lay.addWidget(tc_row)
+        tc_note = QLabel('Timecode is read from the system clock and derived from the selected frame rate.')
+        tc_note.setObjectName('dim')
+        tc_note.setWordWrap(True)
+        gb_tc_lay.addWidget(tc_note)
 
         self._chk_df = QCheckBox('Drop frame  (use with 29.97 / 59.94 fps)')
         self._chk_df.setChecked(False)
@@ -876,23 +822,15 @@ class OpenTrackIOSimulator(QMainWindow):
             self._spin_fps_num.setValue(n)
             self._spin_fps_denom.setValue(d)
 
-    def _on_tc_source_changed(self, idx: int):
-        manual = (idx == 1)
-        for sb in [self._spin_tc_h, self._spin_tc_m, self._spin_tc_s, self._spin_tc_f]:
-            sb.setEnabled(manual)
-
     # ── JSON / packet builder ──────────────────────────────────────────────
 
     def _get_timecode(self):
-        if self._combo_tc_source.currentIndex() == 0:
-            fps_num = self._spin_fps_num.value()
-            fps_den = self._spin_fps_denom.value()
-            fps = fps_num / fps_den if fps_den else 25
-            now = datetime.now()
-            f = int((now.microsecond / 1_000_000) * fps)
-            return now.hour, now.minute, now.second, f
-        return (self._spin_tc_h.value(), self._spin_tc_m.value(),
-                self._spin_tc_s.value(), self._spin_tc_f.value())
+        fps_num = self._spin_fps_num.value()
+        fps_den = self._spin_fps_denom.value()
+        fps = fps_num / fps_den if fps_den else 25
+        now = datetime.now()
+        f = int((now.microsecond / 1_000_000) * fps)
+        return now.hour, now.minute, now.second, f
 
     def _build_json(self) -> bytes:
         self._seq = (self._seq + 1) & 0xFFFF
