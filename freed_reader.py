@@ -12,26 +12,29 @@ __version__   = 'v1.1'
 __author__    = 'Libor Cevelik'
 __copyright__ = 'Copyright (c) 2026 Libor Cevelik'
 
+import ctypes
+import json
 import os
 import socket
 import struct
 import sys
 import threading
 import time
+import uuid
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFrame, QLabel,
     QGridLayout, QVBoxLayout, QHBoxLayout, QFormLayout,
     QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
-    QSpinBox, QPushButton,
+    QSpinBox, QPushButton, QLineEdit, QComboBox,
 )
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QFont, QColor
-from collections import deque
 from datetime import datetime
-import os
 os.environ.setdefault('PYQTGRAPH_QT_LIB', 'PyQt6')
 import pyqtgraph as pg
 import numpy as np
+from protocol import FreeDParser, FreeDReceiver, FreeDReceiverGUI
+from opentrackio import OpenTrackIOSender
 
 # Platform-aware font selection
 if sys.platform == 'darwin':
@@ -60,502 +63,344 @@ if sys.platform == 'win32':
         sys.stderr = _devnull
 
 
-class FreeDParser:
-    """Parser for FreeD (D1) protocol data"""
 
-    FREED_PACKET_SIZE = 29
-    FREED_MESSAGE_TYPE = 0xD1
-
-    def __init__(self, debug=False, ignore_checksum=False):
-        self.packet_count = 0
-        self.error_count = 0
-        self.debug = debug
-        self.ignore_checksum = ignore_checksum
-
-    def parse_24bit_int(self, data: bytes) -> int:
-        """Convert 3 bytes to signed 24-bit integer"""
-        value = int.from_bytes(data, byteorder='big', signed=False)
-        if value & 0x800000:
-            value -= 0x1000000
-        return value
-
-    def calculate_checksum(self, data: bytes) -> int:
-        """Calculate XOR checksum of all bytes"""
-        checksum = 0
-        for byte in data:
-            checksum ^= byte
-        return checksum
-
-    def parse(self, data: bytes) -> dict:
-        """
-        Parse FreeD protocol packet
-        Returns dict with camera tracking data or None if invalid
-        """
-        error_reason = None
-        checksum_valid = True
-        extra_bytes = None
-
-        # Check packet size - allow larger packets but warn
-        if len(data) < self.FREED_PACKET_SIZE:
-            error_reason = f"Packet too small: {len(data)} bytes (expected {self.FREED_PACKET_SIZE})"
-            if self.debug:
-                print(f"  ERROR: {error_reason}")
-            return None
-        elif len(data) > self.FREED_PACKET_SIZE:
-            # Packet is larger than expected - capture extra bytes for analysis
-            extra_bytes = data[self.FREED_PACKET_SIZE:]
-            if self.debug:
-                print(f"  WARNING: Packet larger than expected: {len(data)} bytes (expected {self.FREED_PACKET_SIZE})")
-                print(f"  Extra {len(extra_bytes)} bytes detected: {extra_bytes.hex(' ').upper()}")
-
-        # Verify message type
-        if data[0] != self.FREED_MESSAGE_TYPE:
-            error_reason = f"Invalid message type: 0x{data[0]:02X} (expected 0x{self.FREED_MESSAGE_TYPE:02X})"
-            if self.debug:
-                print(f"  ERROR: {error_reason}")
-            return None
-
-        # Verify checksum
-        calculated_checksum = self.calculate_checksum(data[:-1])
-        packet_checksum = data[-1]
-
-        if calculated_checksum != packet_checksum:
-            checksum_valid = False
-            if not self.ignore_checksum:
-                self.error_count += 1
-                if self.debug:
-                    print(f"  WARNING: Checksum mismatch: 0x{packet_checksum:02X} (expected 0x{calculated_checksum:02X}) - Parsing anyway")
-            # Continue parsing despite checksum error (silently if ignore_checksum is True)
-
-        # Parse data
-        camera_id = data[1]
-        pan = self.parse_24bit_int(data[2:5])
-        tilt = self.parse_24bit_int(data[5:8])
-        roll = self.parse_24bit_int(data[8:11])
-        x = self.parse_24bit_int(data[11:14])
-        y = self.parse_24bit_int(data[14:17])
-        z = self.parse_24bit_int(data[17:20])
-        zoom = self.parse_24bit_int(data[20:23])
-        focus = self.parse_24bit_int(data[23:26])
-        spare = struct.unpack('>H', data[26:28])[0]
-        spare_bytes = data[26:28]
-
-        self.packet_count += 1
-
-        return {
-            'camera_id': camera_id,
-            'pan': pan,
-            'tilt': tilt,
-            'roll': roll,
-            'position': {'x': x, 'y': y, 'z': z},
-            'zoom': zoom,
-            'focus': focus,
-            'spare': spare,
-            'spare_bytes': spare_bytes,
-            'checksum_valid': checksum_valid,
-            'checksum_expected': calculated_checksum,
-            'checksum_actual': packet_checksum,
-            'timestamp': datetime.now().isoformat(),
-            'extra_bytes': extra_bytes,
-            'packet_size': len(data),
-            'message_type': data[0],
-            'raw_bytes': bytes(data)
-        }
+# ── Config / SDK paths ─────────────────────────────────────────────────────
+_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            'freed_forwarder_config.json')
+_BF_DLL_PATH = r'C:\Program Files\Bluefish444\Developer\driver\Release\BlueVelvetC64.dll'
 
 
-class FreeDReceiver:
-    """UDP receiver for FreeD protocol data"""
+# ══════════════════════════════════════════════════════════════════════════════
+# BluefishLTCReader
+# ══════════════════════════════════════════════════════════════════════════════
 
-    def __init__(self, host: str = '0.0.0.0', port: int = 45000, debug: bool = False, step_by_step: bool = False, delay: float = 0.0, ignore_checksum: bool = False, timecode_fps: float = None, convert_units: bool = False, clear_screen: bool = False):
-        self.host = host
-        self.port = port
-        self.socket = None
-        self.parser = FreeDParser(debug=debug, ignore_checksum=ignore_checksum)
-        self.running = False
-        self.debug = debug
-        self._last_error = None   # set if receive_loop exits due to an exception
-        self.step_by_step = step_by_step
-        self.delay = delay
-        self.ignore_checksum = ignore_checksum
-        self.timecode_fps = timecode_fps
-        self.convert_units = convert_units
-        self.clear_screen = clear_screen
+class _LtcSyncStruct(ctypes.Structure):
+    _fields_ = [
+        ('TimeCodeValue',   ctypes.c_uint64),
+        ('TimeCodeIsValid', ctypes.c_uint32),
+        ('_pad',            ctypes.c_uint8 * 20),
+    ]
 
-        # Timecode tracking for analysis
-        self.last_spare_value = None
-        self.spare_increment_count = 0
-        self.spare_same_count = 0
 
-        # Conversion scale factors (based on common FreeD implementations)
-        # Position: most systems use raw / 64.0 = millimeters
-        # Rotation: raw / 32768 = degrees (verified with actual tracking data)
-        self.rotation_scale = 1.0 / 32768.0  # raw / 32768 = degrees
-        self.position_scale = 1.0 / 64.0     # raw / 64.0 = millimeters
+class BluefishLTCReader:
+    """
+    Reads external LTC timecode from a Bluefish444 card via ctypes.
+    bfcWaitExternalLtcInputSync (blocking) is called in a daemon thread.
+    .available = False if DLL missing or card not found — all other code
+    gracefully falls back to system clock.
+    """
 
-        # Zoom: Linear encoding - raw = focal_length × 1000
-        # Fujinon Premista 28-100mm on your specific camera/tracking setup
-        self.zoom_calibration = [
-            (28000, 28.0),    # 28mm wide angle
-            (35000, 35.0),    # 35mm
-            (50000, 50.0),    # 50mm
-            (70000, 70.0),    # 70mm
-            (100000, 100.0)   # 100mm telephoto
-        ]
+    def __init__(self, dll_path: str = _BF_DLL_PATH):
+        self.available   = False
+        self.init_error  = ''   # populated with failure reason if init fails
+        self.running     = False
+        self._lock       = threading.Lock()
+        self._h = self._m = self._s = self._f = 0
+        self._valid      = False
+        self._handle     = None
+        self._dll        = None
+        self._thread     = None
+        self._connector  = self.CONNECTOR_INTERLOCK  # default: Interlock MMCX
+        self._init_sdk(dll_path)
 
-        # Focus: Linear encoding - raw = distance × 1000
-        # Fujinon Premista 28-100mm on your specific camera/tracking setup
-        self.focus_calibration = [
-            (800, 0.8),       # 0.8m MOD (Minimum Object Distance)
-            (892, 0.892),     # 0.892m
-            (1299, 1.299),    # 1.299m
-            (4170, 4.170),    # 4.170m
-            (629000, 629.0)   # 629m (infinity/far focus)
-        ]
+    # EXT LTC source connector constants (EBlueExternalLtcSource)
+    CONNECTOR_BREAKOUT_HEADER = 0   # Epoch PCB header
+    CONNECTOR_GENLOCK_BNC     = 1   # Reference/Genlock BNC (Epoch + Kronos)
+    CONNECTOR_INTERLOCK       = 2   # Interlock MMCX (Kronos only)
+    CONNECTOR_STEM_PORT       = 3   # STEM port (Kronos only)
+    _EXTERNAL_LTC_SOURCE_SEL  = 120 # EXTERNAL_LTC_SOURCE_SELECTION property ID
 
-    def interpolate_zoom(self, raw_value: float) -> float:
-        """
-        Interpolate focal length using measured calibration points
-        Uses piecewise linear interpolation between calibration points
-        """
-        # Handle edge cases
-        if raw_value <= self.zoom_calibration[0][0]:
-            return self.zoom_calibration[0][1]
-        if raw_value >= self.zoom_calibration[-1][0]:
-            return self.zoom_calibration[-1][1]
+    def _init_sdk(self, dll_path: str):
+        try:
+            dll = ctypes.WinDLL(dll_path)
+        except Exception as e:
+            self.init_error = f'DLL load failed: {e}'
+            return
+        try:
+            dll.bfcFactory.restype  = ctypes.c_void_p
+            dll.bfcFactory.argtypes = []
+            dll.bfcDestroy.restype  = None
+            dll.bfcDestroy.argtypes = [ctypes.c_void_p]
+            dll.bfcAttach.restype   = ctypes.c_int32
+            dll.bfcAttach.argtypes  = [ctypes.c_void_p, ctypes.c_int32]
+            dll.bfcDetach.restype   = ctypes.c_int32
+            dll.bfcDetach.argtypes  = [ctypes.c_void_p]
+            dll.bfcWaitExternalLtcInputSync.restype  = ctypes.c_int32
+            dll.bfcWaitExternalLtcInputSync.argtypes = [
+                ctypes.c_void_p, ctypes.POINTER(_LtcSyncStruct)]
+        except Exception as e:
+            self.init_error = f'Function setup failed: {e}'
+            return
+        try:
+            dll.bfcEnumerate.restype  = ctypes.c_int32
+            dll.bfcEnumerate.argtypes = [ctypes.c_void_p,
+                                         ctypes.POINTER(ctypes.c_int32)]
+        except Exception:
+            pass
+        try:
+            handle = dll.bfcFactory()
+        except Exception as e:
+            self.init_error = f'bfcFactory() raised: {e}'
+            return
+        if handle is None:
+            self.init_error = 'bfcFactory() returned None (no card?)'
+            return
+        # Enumerate how many cards the driver sees
+        card_count = ctypes.c_int32(0)
+        try:
+            dll.bfcEnumerate(handle, ctypes.byref(card_count))
+        except Exception:
+            pass
+        n = card_count.value
+        # bfcAttach uses 1-based device IDs (1 = first card, 2 = second, etc.)
+        attached_idx = -1
+        last_err = -1
+        for idx in range(1, max(n, 1) + 1):
+            try:
+                last_err = dll.bfcAttach(handle, idx)
+            except Exception as e:
+                self.init_error = f'bfcAttach({idx}) raised: {e}'
+                dll.bfcDestroy(handle)
+                return
+            if last_err == 0:
+                attached_idx = idx
+                break
+        if attached_idx < 0:
+            self.init_error = (
+                f'bfcAttach() failed on all {max(n,1)} card(s) '
+                f'(last err={last_err}). Driver sees {n} card(s).')
+            dll.bfcDestroy(handle)
+            return
+        # Card attached successfully
+        self._dll      = dll
+        self._handle   = handle
+        self.available = True
+        # Apply LTC connector selection (failure here doesn't block availability)
+        try:
+            dll.bfcSetCardProperty32.restype  = ctypes.c_int32
+            dll.bfcSetCardProperty32.argtypes = [
+                ctypes.c_void_p, ctypes.c_int32, ctypes.c_uint32]
+            dll.bfcSetCardProperty32(
+                handle, self._EXTERNAL_LTC_SOURCE_SEL,
+                ctypes.c_uint32(self._connector))
+        except Exception as e:
+            self.init_error = f'Connector select failed (card still ok): {e}'
 
-        # Find the two calibration points to interpolate between
-        for i in range(len(self.zoom_calibration) - 1):
-            raw_lower, zoom_lower = self.zoom_calibration[i]
-            raw_upper, zoom_upper = self.zoom_calibration[i + 1]
+    def set_connector(self, connector_idx: int):
+        """Change the LTC input connector at runtime (0–3)."""
+        self._connector = connector_idx
+        if self._dll and self._handle:
+            try:
+                self._dll.bfcSetCardProperty32(
+                    self._handle, self._EXTERNAL_LTC_SOURCE_SEL,
+                    ctypes.c_uint32(connector_idx))
+            except Exception:
+                pass
 
-            if raw_lower <= raw_value <= raw_upper:
-                # Linear interpolation between calibration points
-                t = (raw_value - raw_lower) / (raw_upper - raw_lower)
-                return zoom_lower + t * (zoom_upper - zoom_lower)
-
-        # Fallback (shouldn't reach here)
-        return self.zoom_calibration[0][1]
-
-    def interpolate_focus(self, raw_value: float) -> float:
-        """
-        Interpolate focus distance using measured calibration points
-        Uses piecewise linear interpolation between calibration points
-        """
-        # Handle edge cases
-        if raw_value <= self.focus_calibration[0][0]:
-            return self.focus_calibration[0][1]
-        if raw_value >= self.focus_calibration[-1][0]:
-            return self.focus_calibration[-1][1]
-
-        # Find the two calibration points to interpolate between
-        for i in range(len(self.focus_calibration) - 1):
-            raw_lower, focus_lower = self.focus_calibration[i]
-            raw_upper, focus_upper = self.focus_calibration[i + 1]
-
-            if raw_lower <= raw_value <= raw_upper:
-                # Linear interpolation between calibration points
-                t = (raw_value - raw_lower) / (raw_upper - raw_lower)
-                return focus_lower + t * (focus_upper - focus_lower)
-
-        # Fallback (shouldn't reach here)
-        return self.focus_calibration[0][1]
-
-    def parse_timecode(self, spare_value: int, fps: float) -> str:
-        """
-        Parse timecode from spare bytes value
-        Assumes spare_value is total frame count
-        Returns timecode in HH:MM:SS:FF format
-        """
-        if fps is None or fps <= 0:
-            return None
-
-        total_frames = spare_value
-        frames_per_second = int(fps)
-
-        # Calculate timecode components
-        frames = total_frames % frames_per_second
-        total_seconds = total_frames // frames_per_second
-        seconds = total_seconds % 60
-        total_minutes = total_seconds // 60
-        minutes = total_minutes % 60
-        hours = total_minutes // 60
-
-        return f"{hours:02d}:{minutes:02d}:{seconds:02d}:{frames:02d}"
+    @staticmethod
+    def _decode(value: int) -> tuple:
+        return (
+            ((value >> 56) & 0x3) * 10 + ((value >> 48) & 0xF),  # hours
+            ((value >> 40) & 0x7) * 10 + ((value >> 32) & 0xF),  # minutes
+            ((value >> 24) & 0x7) * 10 + ((value >> 16) & 0xF),  # seconds
+            ((value >>  8) & 0x3) * 10 + ((value >>  0) & 0xF),  # frames
+        )
 
     def start(self):
-        """Start listening for FreeD data"""
-        try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-            # Enable address reuse - allows multiple programs to bind to the same port
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
-            # Enable port reuse on systems that support it (Unix/Linux/macOS)
-            # On Windows, SO_REUSEADDR is sufficient
-            try:
-                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-            except (AttributeError, OSError):
-                # SO_REUSEPORT not available on Windows or some systems
-                pass
-
-            # Enable broadcast reception if FreeD data is sent as broadcast
-            try:
-                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            except OSError:
-                pass
-
-            self.socket.bind((self.host, self.port))
-
-            print(f"FreeD Receiver started")
-            print(f"Listening on {self.host}:{self.port}")
-            print(f"Waiting for FreeD packets...")
-            print("-" * 80)
-
-            self.running = True
-            self.receive_loop()
-
-        except Exception as e:
-            print(f"Error starting receiver: {e}")
-            sys.exit(1)
-
-    def receive_loop(self):
-        """Main receive loop"""
-        try:
-            while self.running:
-                try:
-                    data, addr = self.socket.recvfrom(1024)
-                except socket.timeout:
-                    continue  # no data yet — keep waiting, don't kill the thread
-
-                # Show raw packet in debug mode
-                if self.debug:
-                    print(f"\n{'='*80}")
-                    print(f"Packet #{self.parser.packet_count + self.parser.error_count + 1} from {addr[0]}:{addr[1]}")
-                    print(f"Size: {len(data)} bytes")
-                    print(f"Raw hex: {data.hex(' ')}")
-                    print(f"Raw bytes: {' '.join(f'{b:02X}' for b in data)}")
-
-                # Parse FreeD data
-                parsed_data = self.parser.parse(data)
-
-                if parsed_data:
-                    self.display_data(parsed_data, addr)
-                else:
-                    if not self.debug:
-                        print(f"\nInvalid packet from {addr[0]}:{addr[1]} - Size: {len(data)} bytes - Hex: {data[:10].hex(' ')}...")
-
-                # Add delay if specified
-                if self.delay > 0:
-                    time.sleep(self.delay)
-
-                # Wait for user input in step-by-step mode
-                if self.step_by_step:
-                    try:
-                        input("\nPress Enter for next packet (or Ctrl+C to quit)...")
-                    except KeyboardInterrupt:
-                        raise
-
-        except KeyboardInterrupt:
-            print("\n\nShutting down...")
-            self.stop()
-        except Exception as e:
-            self._last_error = str(e)
-            print(f"Error in receive loop: {e}")
-            self.stop()
-
-    def display_data(self, data: dict, addr: tuple):
-        """Display parsed FreeD data"""
-        # Build output buffer to reduce flicker
-        if self.clear_screen:
-            output = []
-        else:
-            output = None
-
-        def add_line(text):
-            if output is not None:
-                output.append(text)
-            else:
-                print(text)
-
-        if not self.debug:
-            add_line(f"\n{'='*80}")
-
-        # Header with checksum warning if needed (hide if ignoring checksums)
-        if self.ignore_checksum:
-            checksum_status = ""
-            add_line(f"Camera ID: {data['camera_id']} | From: {addr[0]}:{addr[1]}")
-        else:
-            checksum_status = "✓" if data['checksum_valid'] else "✗ CHECKSUM WARNING"
-            add_line(f"Camera ID: {data['camera_id']} | From: {addr[0]}:{addr[1]} | {checksum_status}")
-        add_line(f"{'-'*80}")
-
-        # Rotation
-        add_line(f"Rotation:")
-        if self.convert_units:
-            pan_deg = data['pan'] * self.rotation_scale
-            tilt_deg = data['tilt'] * self.rotation_scale
-            roll_deg = data['roll'] * self.rotation_scale
-            add_line(f"  Pan:   {pan_deg:10.2f}°  (raw: {data['pan']:10d})")
-            add_line(f"  Tilt:  {tilt_deg:10.2f}°  (raw: {data['tilt']:10d})")
-            add_line(f"  Roll:  {roll_deg:10.2f}°  (raw: {data['roll']:10d})")
-        else:
-            add_line(f"  Pan:   {data['pan']:10d}  (0x{data['pan'] & 0xFFFFFF:06X})")
-            add_line(f"  Tilt:  {data['tilt']:10d}  (0x{data['tilt'] & 0xFFFFFF:06X})")
-            add_line(f"  Roll:  {data['roll']:10d}  (0x{data['roll'] & 0xFFFFFF:06X})")
-
-        # Position
-        add_line(f"\nPosition:")
-        if self.convert_units:
-            x_mm = data['position']['x'] * self.position_scale
-            y_mm = data['position']['y'] * self.position_scale
-            z_mm = data['position']['z'] * self.position_scale
-            x_m = x_mm / 1000.0
-            y_m = y_mm / 1000.0
-            z_m = z_mm / 1000.0
-            add_line(f"  X:     {x_m:10.3f}m  ({x_mm:10.1f}mm, raw: {data['position']['x']:10d})")
-            add_line(f"  Y:     {y_m:10.3f}m  ({y_mm:10.1f}mm, raw: {data['position']['y']:10d})")
-            add_line(f"  Z:     {z_m:10.3f}m  ({z_mm:10.1f}mm, raw: {data['position']['z']:10d})")
-        else:
-            add_line(f"  X:     {data['position']['x']:10d}  (0x{data['position']['x'] & 0xFFFFFF:06X})")
-            add_line(f"  Y:     {data['position']['y']:10d}  (0x{data['position']['y'] & 0xFFFFFF:06X})")
-            add_line(f"  Z:     {data['position']['z']:10d}  (0x{data['position']['z'] & 0xFFFFFF:06X})")
-
-        # Lens
-        add_line(f"\nLens Data:")
-        if self.convert_units:
-            # Zoom: Piecewise linear interpolation using calibration points
-            focal_length = self.interpolate_zoom(data['zoom'])
-
-            # Focus: Piecewise linear interpolation using calibration points
-            focus_distance = self.interpolate_focus(data['focus'])
-
-            # Convert meters to feet and inches
-            total_inches = focus_distance * 39.3701
-            feet = int(total_inches // 12)
-            inches = total_inches % 12
-
-            add_line(f"  Zoom:  {focal_length:10.1f}mm focal length  (raw: {data['zoom']:10d})")
-            add_line(f"  Focus: {focus_distance:10.2f}m ({feet}ft {inches:.1f}in) (raw: {data['focus']:10d})")
-        else:
-            add_line(f"  Zoom:  {data['zoom']:10d}  (0x{data['zoom'] & 0xFFFFFF:06X})")
-            add_line(f"  Focus: {data['focus']:10d}  (0x{data['focus'] & 0xFFFFFF:06X})")
-
-        # Spare bytes / Timecode
-        add_line(f"\nSpare/Timecode:")
-        add_line(f"  Value: {data['spare']:10d}  (0x{data['spare']:04X})")
-        add_line(f"  Bytes: {data['spare_bytes'].hex(' ').upper()}")
-
-        # Analyze spare byte pattern for timecode detection
-        if self.last_spare_value is not None:
-            diff = data['spare'] - self.last_spare_value
-            if diff == 1:
-                self.spare_increment_count += 1
-                add_line(f"  Change: +1 (incrementing like timecode) [{self.spare_increment_count} consecutive]")
-            elif diff == 0:
-                self.spare_same_count += 1
-                add_line(f"  Change: 0 (no change) [{self.spare_same_count} consecutive]")
-            else:
-                add_line(f"  Change: {diff:+d}")
-                self.spare_increment_count = 0
-                self.spare_same_count = 0
-        self.last_spare_value = data['spare']
-
-        # Parse and display timecode if FPS is specified
-        if self.timecode_fps:
-            timecode = self.parse_timecode(data['spare'], self.timecode_fps)
-            add_line(f"  Timecode: {timecode} @ {self.timecode_fps} fps")
-
-            # Timecode validation hint
-            if self.spare_increment_count > 10:
-                add_line(f"  ✓ LIKELY REAL TIMECODE (incrementing consistently)")
-
-        # Packet size verification
-        add_line(f"\nPacket Verification:")
-        expected_size = 29
-        if data['packet_size'] == expected_size:
-            add_line(f"  Size: {data['packet_size']} bytes ✓ (matches FreeD D1 standard)")
-        else:
-            add_line(f"  Size: {data['packet_size']} bytes ⚠️  (expected {expected_size} bytes)")
-            add_line(f"  Difference: {data['packet_size'] - expected_size:+d} bytes")
-
-        # Display extra bytes if present
-        if data['extra_bytes'] is not None:
-            add_line(f"\n⚠️  EXTRA DATA DETECTED:")
-            add_line(f"  Extra bytes: {len(data['extra_bytes'])} bytes")
-            add_line(f"  Hex: {data['extra_bytes'].hex(' ').upper()}")
-            add_line(f"  ASCII: {' '.join(chr(b) if 32 <= b < 127 else '.' for b in data['extra_bytes'])}")
-            add_line(f"  Decimal: {' '.join(str(b) for b in data['extra_bytes'])}")
-
-        # Checksum info (only show if not ignoring checksums)
-        if not self.ignore_checksum and not data['checksum_valid']:
-            add_line(f"\n⚠️  Checksum: Expected 0x{data['checksum_expected']:02X}, Got 0x{data['checksum_actual']:02X}")
-
-        # Statistics
-        if self.ignore_checksum:
-            add_line(f"\nPackets: {self.parser.packet_count}")
-        else:
-            add_line(f"\nPackets: {self.parser.packet_count} valid | {self.parser.error_count} checksum errors")
-        add_line(f"Time: {data['timestamp']}")
-        add_line(f"{'='*80}")
-
-        # If using clear screen mode, print entire buffer at once to reduce flicker
-        if output is not None:
-            # Move cursor to home and print everything at once
-            print('\033[H' + '\n'.join(output), end='', flush=True)
+        if not self.available:
+            return
+        self.running = True
+        self._thread = threading.Thread(target=self._run, daemon=True, name='BluefishLTC')
+        self._thread.start()
 
     def stop(self):
-        """Stop the receiver"""
         self.running = False
-        if self.socket:
-            self.socket.close()
-        print(f"\nTotal packets received: {self.parser.packet_count}")
-        print(f"Total errors: {self.parser.error_count}")
+        if self._dll and self._handle:
+            try:
+                self._dll.bfcDetach(self._handle)
+                self._dll.bfcDestroy(self._handle)
+            except Exception:
+                pass
+            self._handle = None
+
+    def get(self) -> tuple:
+        """Returns (h, m, s, f, valid)."""
+        with self._lock:
+            return self._h, self._m, self._s, self._f, self._valid
+
+    def _run(self):
+        sync = _LtcSyncStruct()
+        while self.running and self._handle:
+            try:
+                err = self._dll.bfcWaitExternalLtcInputSync(
+                    self._handle, ctypes.byref(sync))
+                with self._lock:
+                    if err == 0 and sync.TimeCodeIsValid:
+                        self._h, self._m, self._s, self._f = self._decode(sync.TimeCodeValue)
+                        self._valid = True
+                    else:
+                        self._valid = False
+            except Exception:
+                with self._lock:
+                    self._valid = False
+                time.sleep(0.1)
 
 
-class FreeDReceiverGUI(FreeDReceiver):
-    """FreeDReceiver subclass that stores latest data instead of printing it"""
+# ══════════════════════════════════════════════════════════════════════════════
+# FreeDForwarder
+# ══════════════════════════════════════════════════════════════════════════════
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.latest_data = None
-        self.latest_addr = None
-        self._last_packet_time = None
-        self.packet_interval_ms = None   # smoothed ms between packets
-        self.packet_fps = None           # smoothed fps
-        self._interval_history = deque(maxlen=30)   # rolling window (avg/fps)
-        self._gl_phase_history = deque(maxlen=8)    # phase counter cycling → locked
-        self._jitter_history   = deque(maxlen=500)  # long history for jitter tab
-        self._rfc_jitter       = 0.0                # RFC 3550-style jitter accumulator
-        self._prev_interval    = None               # previous interval for RFC diff
+class FreeDForwarder:
+    """
+    Forwards FreeD packets (with optional TC injection) to multiple UDP
+    destinations.  Config is persisted to a JSON file next to the script.
+    """
 
-    def display_data(self, data: dict, addr: tuple):
-        now = time.monotonic()
-        if self._last_packet_time is not None:
-            interval = (now - self._last_packet_time) * 1000.0
-            # Gap >2s means we just reconnected — reset history so fps is clean
-            if interval > 2000.0:
-                self._interval_history.clear()
-                self._gl_phase_history.clear()
-                self._jitter_history.clear()
-                self._rfc_jitter    = 0.0
-                self._prev_interval = None
-            else:
-                self._interval_history.append(interval)
-                avg = sum(self._interval_history) / len(self._interval_history)
-                self.packet_interval_ms = avg
-                self.packet_fps = 1000.0 / avg if avg > 0 else None
-                self._jitter_history.append(interval)
-                if self._prev_interval is not None:
-                    d = abs(interval - self._prev_interval)
-                    self._rfc_jitter += (d - self._rfc_jitter) / 16.0
-                self._prev_interval = interval
-        self._last_packet_time = now
-        # Track genlock phase counter (upper nibble of byte 26)
-        rb = data.get('raw_bytes')
-        if rb and len(rb) > 26:
-            self._gl_phase_history.append((rb[26] >> 4) & 0xF)
-        self.latest_data = data
-        self.latest_addr = addr
+    FPS_OPTIONS = [23.976, 24.0, 25.0, 29.97, 30.0, 48.0, 50.0, 60.0]
+
+    def __init__(self, config_path: str = _CONFIG_PATH):
+        self._config_path      = config_path
+        self.destinations      = []
+        self.tc_inject         = False
+        self.tc_source         = 'system'   # 'system' | 'bluefish'
+        self.tc_fps            = 25.0
+        self.ltc_connector     = 2          # EXT_LTC_SRC_INTERLOCK default
+        self.packets_forwarded = 0
+        self._lock             = threading.Lock()
+        self._sock             = None
+        self._open_socket()
+        self.load_config()
+
+    def _open_socket(self):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            self._sock = s
+        except Exception:
+            self._sock = None
+
+    # ── forwarding ─────────────────────────────────────────────────────────
+
+    def forward(self, raw: bytes, ltc_reader=None):
+        """Called from the receive thread on every valid packet."""
+        if self._sock is None:
+            return
+        buf = bytearray(raw)
+        if self.tc_inject and len(buf) == 29:
+            buf = self._inject_tc(buf, ltc_reader)
+        payload = bytes(buf)
+        with self._lock:
+            dests = list(self.destinations)
+        for d in dests:
+            if not d.get('enabled', False):
+                continue
+            ip   = d.get('ip', '').strip()
+            port = d.get('port', 45000)
+            if not ip:
+                continue
+            try:
+                self._sock.sendto(payload, (ip, port))
+                self.packets_forwarded += 1
+            except Exception:
+                pass
+
+    def _inject_tc(self, raw: bytearray, ltc_reader) -> bytearray:
+        fps_int = max(1, round(self.tc_fps))
+        if self.tc_source == 'bluefish' and ltc_reader and ltc_reader.available:
+            h, m, s, f, valid = ltc_reader.get()
+            if not valid:
+                h, m, s, f = self._system_tc(fps_int)
+        else:
+            h, m, s, f = self._system_tc(fps_int)
+        # Bytes 26–27: H:M:S bit-pack (backward-compat spare field)
+        #   bits [15:11] = hours (5 bits), [10:5] = minutes (6 bits),
+        #   [4:0] = seconds // 2 (5 bits, 2-second resolution)
+        wire = ((h & 0x1F) << 11) | ((m & 0x3F) << 5) | ((s >> 1) & 0x1F)
+        raw[26] = (wire >> 8) & 0xFF
+        raw[27] =  wire       & 0xFF
+        raw[28] = (0x40 - sum(raw[:28])) & 0xFF
+        # Bytes 29–32: extended TC block — full H:M:S:F, one byte each
+        raw += bytearray([h & 0xFF, m & 0xFF, s & 0xFF, f & 0xFF])
+        return raw
+
+    @staticmethod
+    def _system_tc(fps_int: int) -> tuple:
+        now = datetime.now()
+        f   = int((now.microsecond / 1_000_000) * fps_int)
+        return now.hour, now.minute, now.second, f
+
+    def current_tc_str(self, ltc_reader=None) -> str:
+        fps_int = max(1, round(self.tc_fps))
+        if self.tc_source == 'bluefish' and ltc_reader and ltc_reader.available:
+            h, m, s, f, valid = ltc_reader.get()
+            if not valid:
+                h, m, s, f = self._system_tc(fps_int)
+        else:
+            h, m, s, f = self._system_tc(fps_int)
+        return f'{h:02d}:{m:02d}:{s:02d}:{f:02d}'
+
+    # ── persistence ────────────────────────────────────────────────────────
+
+    def save_config(self):
+        try:
+            with self._lock:
+                data = {
+                    'destinations':    list(self.destinations),
+                    'tc_inject':       self.tc_inject,
+                    'tc_source':       self.tc_source,
+                    'tc_fps':          self.tc_fps,
+                    'ltc_connector':   self.ltc_connector,
+                    'oti_enabled':     self.oti_enabled,
+                    'oti_ip':          self.oti_ip,
+                    'oti_port':        self.oti_port,
+                    'oti_subject':     self.oti_subject,
+                    'oti_source_id':   self.oti_source_id,
+                }
+            with open(self._config_path, 'w') as fh:
+                json.dump(data, fh, indent=2)
+        except Exception:
+            pass
+
+    _PERMANENT = {'ip': '127.0.0.1', 'port': 40000, 'enabled': False, 'permanent': True}
+
+    def load_config(self):
+        try:
+            with open(self._config_path) as fh:
+                data = json.load(fh)
+            # Strip any saved permanent entry — we always re-prepend the canonical one
+            user_dests = [d for d in data.get('destinations', [])
+                          if not d.get('permanent', False)]
+            with self._lock:
+                self.destinations  = [dict(self._PERMANENT)] + user_dests
+                self.tc_inject     = bool(data.get('tc_inject', True))
+                self.tc_source     = data.get('tc_source', 'system')
+                self.tc_fps        = float(data.get('tc_fps', 25.0))
+                self.ltc_connector = int(data.get('ltc_connector', 1))
+                self.oti_enabled   = bool(data.get('oti_enabled', False))
+                self.oti_ip        = data.get('oti_ip', '127.0.0.1')
+                self.oti_port      = int(data.get('oti_port', 55555))
+                self.oti_subject   = data.get('oti_subject', 'Camera')
+                self.oti_source_id = data.get('oti_source_id') or str(uuid.uuid4())
+        except Exception:
+            self.destinations  = [
+                dict(self._PERMANENT),
+                {'ip': '', 'port': 45000, 'enabled': False},
+                {'ip': '', 'port': 45000, 'enabled': False},
+            ]
+            self.tc_inject     = True
+            self.tc_source     = 'auto'   # resolved in FreeDDashboard.__init__
+            self.oti_enabled   = False
+            self.oti_ip        = '127.0.0.1'
+            self.oti_port      = 55555
+            self.oti_subject   = 'Camera'
+            self.oti_source_id = str(uuid.uuid4())
+
+    def close(self):
+        if self._sock:
+            try:
+                self._sock.close()
+            except Exception:
+                pass
 
 
 class FreeDDashboard(QMainWindow):
@@ -574,11 +419,26 @@ class FreeDDashboard(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.receiver = None
-        self.recv_thread = None
+        self.receiver     = None
+        self.recv_thread  = None
         self._active_port = 45000
+        self.forwarder    = FreeDForwarder()
+        self.oti_sender   = OpenTrackIOSender()
+        # Apply persisted OTI settings (forwarder.load_config() already ran)
+        self.oti_sender.enabled      = self.forwarder.oti_enabled
+        self.oti_sender.ip           = self.forwarder.oti_ip
+        self.oti_sender.port         = self.forwarder.oti_port
+        self.oti_sender.subject_name = self.forwarder.oti_subject
+        self.oti_sender._source_id   = self.forwarder.oti_source_id
+        self.ltc_reader   = BluefishLTCReader()
+        # Apply saved connector choice (calls bfcSetCardProperty32 if card attached)
+        self.ltc_reader.set_connector(self.forwarder.ltc_connector)
+        # Resolve 'auto' source: use BlueFish if available, else system clock
+        if self.forwarder.tc_source == 'auto':
+            self.forwarder.tc_source = 'bluefish' if self.ltc_reader.available else 'system'
         self._build_ui()
         self._start_receiver()
+        self.ltc_reader.start()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._do_update)
         self._timer.start(100)
@@ -1048,22 +908,48 @@ class FreeDDashboard(QMainWindow):
         layout.addWidget(hist_card, stretch=2)
 
     def _build_settings_tab(self, parent: QWidget):
-        layout = QVBoxLayout(parent)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(10)
-        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        outer = QVBoxLayout(parent)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        # ── Network card ──────────────────────────────────────────────
+        # Sub-tab bar inside Settings
+        sub_tabs = QTabWidget()
+        sub_tabs.setStyleSheet(f"""
+            QTabWidget::pane {{
+                border: none;
+                background-color: {self.BG};
+            }}
+            QTabBar::tab {{
+                background-color: {self.BG};
+                color: {self.DIM};
+                padding: 6px 16px;
+                border: none;
+                font-size: 12px;
+                font-family: {_FONT_SANS};
+            }}
+            QTabBar::tab:selected {{
+                color: {self.FG};
+                border-bottom: 2px solid {self.CYAN};
+            }}
+            QTabBar::tab:hover {{
+                color: {self.FG};
+            }}
+        """)
+        outer.addWidget(sub_tabs)
+
+        # ── Network sub-tab ───────────────────────────────────────────
+        net_page = QWidget()
+        net_page.setStyleSheet(f'background-color: {self.BG};')
+        net_layout = QVBoxLayout(net_page)
+        net_layout.setContentsMargins(10, 10, 10, 10)
+        net_layout.setSpacing(10)
+        net_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
         net_frame = QFrame()
         net_frame.setObjectName('card')
-        net_layout = QVBoxLayout(net_frame)
-        net_layout.setContentsMargins(16, 12, 16, 14)
-        net_layout.setSpacing(10)
-
-        net_title = QLabel('NETWORK')
-        net_title.setFont(QFont(_FONT_SANS, 9, QFont.Weight.Bold))
-        net_title.setStyleSheet(f'color: {self.DIM}; background: transparent;')
-        net_layout.addWidget(net_title)
+        net_inner = QVBoxLayout(net_frame)
+        net_inner.setContentsMargins(16, 12, 16, 14)
+        net_inner.setSpacing(10)
 
         row = QWidget()
         row.setStyleSheet('background: transparent;')
@@ -1082,18 +968,12 @@ class FreeDDashboard(QMainWindow):
         self._settings_port_spin.setFixedWidth(100)
         self._settings_port_spin.setStyleSheet(f"""
             QSpinBox {{
-                background-color: {self.BG};
-                color: {self.FG};
-                border: 1px solid {self.BORDER};
-                border-radius: 6px;
-                padding: 4px 8px;
-                font-family: {_FONT_MONO};
-                font-size: 13px;
+                background-color: {self.BG}; color: {self.FG};
+                border: 1px solid {self.BORDER}; border-radius: 6px;
+                padding: 4px 8px; font-family: {_FONT_MONO}; font-size: 13px;
             }}
             QSpinBox::up-button, QSpinBox::down-button {{
-                width: 18px;
-                background-color: {self.BORDER};
-                border-radius: 3px;
+                width: 18px; background-color: {self.BORDER}; border-radius: 3px;
             }}
         """)
         row_layout.addWidget(self._settings_port_spin)
@@ -1102,34 +982,258 @@ class FreeDDashboard(QMainWindow):
         apply_btn.setFixedWidth(80)
         apply_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: {self.CYAN};
-                color: #000000;
-                border: none;
-                border-radius: 6px;
-                padding: 5px 14px;
-                font-family: {_FONT_SANS};
-                font-size: 12px;
-                font-weight: bold;
+                background-color: {self.CYAN}; color: #000000;
+                border: none; border-radius: 6px; padding: 5px 14px;
+                font-family: {_FONT_SANS}; font-size: 12px; font-weight: bold;
             }}
-            QPushButton:hover {{
-                background-color: #5ac8fa;
-            }}
-            QPushButton:pressed {{
-                background-color: #0a84ff;
-            }}
+            QPushButton:hover {{ background-color: #5ac8fa; }}
+            QPushButton:pressed {{ background-color: #0a84ff; }}
         """)
         apply_btn.clicked.connect(self._on_apply_port)
         row_layout.addWidget(apply_btn)
         row_layout.addStretch()
-
-        net_layout.addWidget(row)
+        net_inner.addWidget(row)
 
         self._settings_status = QLabel(f'● Listening on port {self._active_port}')
         self._settings_status.setFont(QFont(_FONT_SANS, 10))
         self._settings_status.setStyleSheet(f'color: {self.GREEN}; background: transparent;')
-        net_layout.addWidget(self._settings_status)
+        net_inner.addWidget(self._settings_status)
 
-        layout.addWidget(net_frame)
+        net_layout.addWidget(net_frame)
+        sub_tabs.addTab(net_page, 'Network')
+
+        # ── Output Destinations sub-tab ───────────────────────────────
+        dest_page = QWidget()
+        dest_page.setStyleSheet(f'background-color: {self.BG};')
+        dest_layout = QVBoxLayout(dest_page)
+        dest_layout.setContentsMargins(10, 10, 10, 10)
+        dest_layout.setSpacing(10)
+        dest_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        dest_frame = QFrame()
+        dest_frame.setObjectName('card')
+        dest_outer = QVBoxLayout(dest_frame)
+        dest_outer.setContentsMargins(16, 12, 16, 14)
+        dest_outer.setSpacing(8)
+
+        # Column header
+        hdr = QWidget()
+        hdr.setStyleSheet('background: transparent;')
+        hdr_l = QHBoxLayout(hdr)
+        hdr_l.setContentsMargins(0, 0, 0, 0)
+        hdr_l.setSpacing(8)
+        for txt, w in [('IP / Broadcast', 160), ('Port', 85), ('Enable', 50), ('', 30)]:
+            lbl = QLabel(txt)
+            lbl.setFixedWidth(w)
+            lbl.setFont(QFont(_FONT_SANS, 9))
+            lbl.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+            hdr_l.addWidget(lbl)
+        hdr_l.addStretch()
+        dest_outer.addWidget(hdr)
+
+        rows_container = QWidget()
+        rows_container.setStyleSheet('background: transparent;')
+        self._dest_rows_layout = QVBoxLayout(rows_container)
+        self._dest_rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._dest_rows_layout.setSpacing(4)
+        dest_outer.addWidget(rows_container)
+
+        self._dest_rows = []
+        for d in self.forwarder.destinations:
+            self._add_dest_row(d)
+
+        add_row_w = QWidget()
+        add_row_w.setStyleSheet('background: transparent;')
+        add_row_l = QHBoxLayout(add_row_w)
+        add_row_l.setContentsMargins(0, 4, 0, 0)
+        add_row_l.setSpacing(0)
+        add_btn = QPushButton('+ Add destination')
+        add_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent; color: {self.CYAN};
+                border: 1px solid {self.CYAN}; border-radius: 6px;
+                padding: 4px 12px; font-family: {_FONT_SANS}; font-size: 12px;
+            }}
+            QPushButton:hover {{ background-color: {self.CARD}; }}
+        """)
+        add_btn.clicked.connect(self._on_add_dest)
+        add_row_l.addWidget(add_btn)
+        add_row_l.addStretch()
+        dest_outer.addWidget(add_row_w)
+
+        self._fwd_count_lbl = QLabel('Forwarded: 0 pkts')
+        self._fwd_count_lbl.setFont(QFont(_FONT_SANS, 10))
+        self._fwd_count_lbl.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+        dest_outer.addWidget(self._fwd_count_lbl)
+
+        # ── OpenTrackIO section ───────────────────────────────────────
+        oti_frame = QFrame()
+        oti_frame.setStyleSheet(f'''
+            QFrame {{ background-color: {self.CARD}; border-radius: 10px;
+                      border: 1px solid {self.BORDER}; }}
+        ''')
+        oti_outer = QVBoxLayout(oti_frame)
+        oti_outer.setContentsMargins(14, 10, 14, 12)
+        oti_outer.setSpacing(8)
+
+        oti_hdr = QLabel('OpenTrackIO Output')
+        oti_hdr.setFont(QFont(_FONT_SANS, 11, QFont.Weight.Bold))
+        oti_hdr.setStyleSheet(f'color: {self.FG}; background: transparent;')
+        oti_outer.addWidget(oti_hdr)
+
+        oti_sub = QLabel('UDP · JSON · OpenTrackIO v1.0.1 · SMPTE RIS-OSVP')
+        oti_sub.setFont(QFont(_FONT_SANS, 9))
+        oti_sub.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+        oti_outer.addWidget(oti_sub)
+
+        _field_style = f'''QLineEdit {{
+            background: {self.BG}; color: {self.FG}; border: 1px solid {self.BORDER};
+            border-radius: 6px; padding: 4px 8px;
+            font-family: {_FONT_MONO}; font-size: 12px;
+        }}'''
+
+        # Enable + IP + Port row
+        oti_row_w = QWidget(); oti_row_w.setStyleSheet('background: transparent;')
+        oti_row_l = QHBoxLayout(oti_row_w)
+        oti_row_l.setContentsMargins(0, 0, 0, 0); oti_row_l.setSpacing(8)
+
+        self._oti_enable_btn = QPushButton('OFF')
+        self._oti_enable_btn.setCheckable(True)
+        self._oti_enable_btn.setFixedWidth(50)
+        self._oti_enable_btn.setChecked(self.oti_sender.enabled)
+        self._oti_enable_btn.setStyleSheet(self._dest_toggle_style(self.oti_sender.enabled))
+        self._oti_enable_btn.toggled.connect(self._on_oti_toggle)
+        oti_row_l.addWidget(self._oti_enable_btn)
+
+        self._oti_ip = QLineEdit(self.oti_sender.ip)
+        self._oti_ip.setFixedWidth(160)
+        self._oti_ip.setStyleSheet(_field_style)
+        self._oti_ip.setPlaceholderText('127.0.0.1')
+        self._oti_ip.editingFinished.connect(self._on_oti_ip_changed)
+        oti_row_l.addWidget(self._oti_ip)
+
+        oti_colon = QLabel(':')
+        oti_colon.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+        oti_row_l.addWidget(oti_colon)
+
+        self._oti_port = QLineEdit(str(self.oti_sender.port))
+        self._oti_port.setFixedWidth(70)
+        self._oti_port.setStyleSheet(_field_style)
+        self._oti_port.setPlaceholderText('55555')
+        self._oti_port.editingFinished.connect(self._on_oti_port_changed)
+        oti_row_l.addWidget(self._oti_port)
+        oti_row_l.addStretch()
+        oti_outer.addWidget(oti_row_w)
+
+
+        dest_layout.addWidget(dest_frame)
+        dest_layout.addWidget(oti_frame)
+        sub_tabs.addTab(dest_page, 'Output')
+
+        # ── Timecode sub-tab ──────────────────────────────────────────
+        tc_page = QWidget()
+        tc_page.setStyleSheet(f'background-color: {self.BG};')
+        tc_layout = QVBoxLayout(tc_page)
+        tc_layout.setContentsMargins(10, 10, 10, 10)
+        tc_layout.setSpacing(10)
+        tc_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        tc_frame = QFrame()
+        tc_frame.setObjectName('card')
+        tc_outer = QVBoxLayout(tc_frame)
+        tc_outer.setContentsMargins(16, 12, 16, 14)
+        tc_outer.setSpacing(12)
+
+        _combo_style = f"""
+            QComboBox {{
+                background-color: {self.BG}; color: {self.FG};
+                border: 1px solid {self.BORDER}; border-radius: 6px;
+                padding: 4px 8px; font-family: {_FONT_SANS}; font-size: 12px;
+            }}
+            QComboBox::drop-down {{ border: none; width: 20px; }}
+            QComboBox QAbstractItemView {{
+                background-color: {self.CARD}; color: {self.FG};
+                selection-background-color: {self.CYAN}; selection-color: #000000;
+            }}
+        """
+
+        def _tc_row(label_text):
+            w = QWidget(); w.setStyleSheet('background: transparent;')
+            hl = QHBoxLayout(w); hl.setContentsMargins(0,0,0,0); hl.setSpacing(12)
+            lbl = QLabel(label_text)
+            lbl.setFixedWidth(140)
+            lbl.setFont(QFont(_FONT_SANS, 11))
+            lbl.setStyleSheet(f'color: {self.FG}; background: transparent;')
+            hl.addWidget(lbl)
+            return w, hl
+
+        # Source
+        src_w, src_l = _tc_row('Source')
+        self._tc_src_combo = QComboBox()
+        self._tc_src_combo.setFixedWidth(220)
+        self._tc_src_combo.setStyleSheet(_combo_style)
+        self._tc_src_combo.addItem('System Clock', 'system')
+        self._tc_src_combo.addItem(
+            'BlueFish LTC (ext)' if self.ltc_reader.available
+            else 'BlueFish LTC (not detected)', 'bluefish')
+        for i in range(self._tc_src_combo.count()):
+            if self._tc_src_combo.itemData(i) == self.forwarder.tc_source:
+                self._tc_src_combo.setCurrentIndex(i); break
+        self._tc_src_combo.currentIndexChanged.connect(self._on_tc_source_changed)
+        src_l.addWidget(self._tc_src_combo)
+        src_l.addStretch()
+        tc_outer.addWidget(src_w)
+
+        # LTC Connector (only visible when BlueFish source selected)
+        conn_w, conn_l = _tc_row('LTC Connector')
+        self._ltc_conn_combo = QComboBox()
+        self._ltc_conn_combo.setFixedWidth(200)
+        self._ltc_conn_combo.setStyleSheet(_combo_style)
+        _conn_options = [
+            (0, 'Breakout Header (PCB)'),
+            (1, 'Genlock / Ref BNC'),
+            (2, 'Interlock MMCX'),
+            (3, 'STEM Port'),
+        ]
+        for idx, label in _conn_options:
+            self._ltc_conn_combo.addItem(label, idx)
+        # Pre-select saved connector
+        for i in range(self._ltc_conn_combo.count()):
+            if self._ltc_conn_combo.itemData(i) == self.forwarder.ltc_connector:
+                self._ltc_conn_combo.setCurrentIndex(i); break
+        self._ltc_conn_combo.currentIndexChanged.connect(self._on_ltc_connector_changed)
+        conn_l.addWidget(self._ltc_conn_combo)
+        conn_l.addStretch()
+        tc_outer.addWidget(conn_w)
+
+        # FPS
+        fps_w, fps_l = _tc_row('TC FPS')
+        self._tc_fps_combo = QComboBox()
+        self._tc_fps_combo.setFixedWidth(110)
+        self._tc_fps_combo.setStyleSheet(_combo_style)
+        _fps_labels = {23.976: '23.976', 24.0: '24', 25.0: '25',
+                       29.97: '29.97', 30.0: '30', 48.0: '48', 50.0: '50', 60.0: '60'}
+        for v in FreeDForwarder.FPS_OPTIONS:
+            self._tc_fps_combo.addItem(_fps_labels.get(v, str(v)), v)
+        for i in range(self._tc_fps_combo.count()):
+            if abs(self._tc_fps_combo.itemData(i) - self.forwarder.tc_fps) < 0.01:
+                self._tc_fps_combo.setCurrentIndex(i); break
+        self._tc_fps_combo.currentIndexChanged.connect(self._on_tc_fps_changed)
+        fps_l.addWidget(self._tc_fps_combo)
+        fps_l.addStretch()
+        tc_outer.addWidget(fps_w)
+
+        # Preview
+        prev_w, prev_l = _tc_row('Preview')
+        self._tc_preview_lbl = QLabel('--:--:--:--')
+        self._tc_preview_lbl.setFont(QFont(_FONT_MONO, 13))
+        self._tc_preview_lbl.setStyleSheet(f'color: {self.CYAN}; background: transparent;')
+        prev_l.addWidget(self._tc_preview_lbl)
+        prev_l.addStretch()
+        tc_outer.addWidget(prev_w)
+
+        tc_layout.addWidget(tc_frame)
+        sub_tabs.addTab(tc_page, 'Timecode')
 
     def _on_apply_port(self):
         port = self._settings_port_spin.value()
@@ -1141,6 +1245,185 @@ class FreeDDashboard(QMainWindow):
         self._restart_receiver(port)
         self._settings_status.setText(f'● Listening on port {port}')
         self._settings_status.setStyleSheet(f'color: {self.GREEN}; background: transparent;')
+
+    # ------------------------------------------------------------------
+    # Destination row helpers
+    # ------------------------------------------------------------------
+
+    def _dest_toggle_style(self, on: bool) -> str:
+        if on:
+            return f"""QPushButton {{
+                background-color: {self.GREEN}; color: #000000;
+                border: none; border-radius: 6px; padding: 4px 6px;
+                font-family: {_FONT_SANS}; font-size: 11px; font-weight: bold;
+            }}"""
+        return f"""QPushButton {{
+            background-color: {self.BG}; color: {self.DIM};
+            border: 1px solid {self.BORDER}; border-radius: 6px; padding: 4px 6px;
+            font-family: {_FONT_SANS}; font-size: 11px;
+        }}"""
+
+    def _add_dest_row(self, d: dict = None):
+        if d is None:
+            d = {'ip': '', 'port': 45000, 'enabled': False}
+        permanent = d.get('permanent', False)
+
+        row_w = QWidget()
+        row_w.setStyleSheet('background: transparent;')
+        row_l = QHBoxLayout(row_w)
+        row_l.setContentsMargins(0, 0, 0, 0)
+        row_l.setSpacing(8)
+
+        ip_edit = QLineEdit()
+        ip_edit.setPlaceholderText('IP or 255.255.255.255')
+        ip_edit.setText(d.get('ip', ''))
+        ip_edit.setFixedWidth(160)
+        ip_edit.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: {self.BG}; color: {self.FG};
+                border: 1px solid {self.BORDER}; border-radius: 6px;
+                padding: 4px 8px; font-family: {_FONT_MONO}; font-size: 12px;
+            }}
+            QLineEdit:focus {{ border-color: {self.CYAN}; }}
+        """)
+        row_l.addWidget(ip_edit)
+
+        port_spin = QSpinBox()
+        port_spin.setRange(1, 65535)
+        port_spin.setValue(d.get('port', 45000))
+        port_spin.setFixedWidth(85)
+        port_spin.setStyleSheet(f"""
+            QSpinBox {{
+                background-color: {self.BG}; color: {self.FG};
+                border: 1px solid {self.BORDER}; border-radius: 6px;
+                padding: 4px 6px; font-family: {_FONT_MONO}; font-size: 12px;
+            }}
+            QSpinBox::up-button, QSpinBox::down-button {{
+                width: 16px; background-color: {self.BORDER}; border-radius: 3px;
+            }}
+        """)
+        row_l.addWidget(port_spin)
+
+        enabled = d.get('enabled', False)
+        en_btn = QPushButton('ON' if enabled else 'OFF')
+        en_btn.setCheckable(True)
+        en_btn.setChecked(enabled)
+        en_btn.setFixedWidth(50)
+        en_btn.setStyleSheet(self._dest_toggle_style(enabled))
+        en_btn.clicked.connect(lambda checked, b=en_btn: self._on_dest_enable(b, checked))
+        row_l.addWidget(en_btn)
+
+        if permanent:
+            spacer = QLabel('')
+            spacer.setFixedWidth(28)
+            row_l.addWidget(spacer)
+        else:
+            rm_btn = QPushButton('✕')
+            rm_btn.setFixedWidth(28)
+            rm_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: transparent; color: {self.RED};
+                    border: 1px solid {self.RED}; border-radius: 6px;
+                    font-size: 11px; padding: 2px;
+                }}
+                QPushButton:hover {{ background-color: {self.RED}; color: #ffffff; }}
+            """)
+            row_l.addWidget(rm_btn)
+
+        row_l.addStretch()
+
+        row_info = {'widget': row_w, 'ip': ip_edit, 'port': port_spin,
+                    'enable': en_btn, 'permanent': permanent}
+        self._dest_rows.append(row_info)
+        self._dest_rows_layout.addWidget(row_w)
+
+        ip_edit.textChanged.connect(self._sync_destinations)
+        port_spin.valueChanged.connect(self._sync_destinations)
+        if not permanent:
+            rm_btn.clicked.connect(lambda _, ri=row_info: self._remove_dest_row(ri))
+
+    def _on_dest_enable(self, btn: QPushButton, checked: bool):
+        btn.setText('ON' if checked else 'OFF')
+        btn.setStyleSheet(self._dest_toggle_style(checked))
+        self._sync_destinations()
+
+    def _remove_dest_row(self, row_info: dict):
+        self._dest_rows = [r for r in self._dest_rows if r is not row_info]
+        row_info['widget'].setParent(None)
+        row_info['widget'].deleteLater()
+        self._sync_destinations()
+
+    def _on_add_dest(self):
+        self._add_dest_row()
+        self._sync_destinations()
+
+    def _sync_destinations(self):
+        dests = []
+        for r in self._dest_rows:
+            d = {'ip': r['ip'].text().strip(),
+                 'port': r['port'].value(),
+                 'enabled': r['enable'].isChecked()}
+            if r.get('permanent'):
+                d['permanent'] = True
+            dests.append(d)
+        self.forwarder.destinations = dests
+        self.forwarder.save_config()
+
+    # ------------------------------------------------------------------
+    # Timecode injection helpers
+    # ------------------------------------------------------------------
+
+    def _on_tc_source_changed(self, idx: int):
+        self.forwarder.tc_source = self._tc_src_combo.itemData(idx) or 'system'
+        self.forwarder.save_config()
+
+    def _on_tc_fps_changed(self, idx: int):
+        self.forwarder.tc_fps = self._tc_fps_combo.itemData(idx) or 25.0
+        self.forwarder.save_config()
+
+    def _on_ltc_connector_changed(self, idx: int):
+        connector = self._ltc_conn_combo.itemData(idx)
+        if connector is None:
+            return
+        self.forwarder.ltc_connector = connector
+        self.ltc_reader.set_connector(connector)
+        self.forwarder.save_config()
+
+    def _on_oti_toggle(self, checked: bool):
+        self.oti_sender.enabled = checked
+        self._oti_enable_btn.setText('ON' if checked else 'OFF')
+        self._oti_enable_btn.setStyleSheet(self._dest_toggle_style(checked))
+        self.forwarder.oti_enabled = checked
+        self.forwarder.save_config()
+
+    def _on_oti_ip_changed(self):
+        ip = self._oti_ip.text().strip()
+        if ip:
+            self.oti_sender.ip = ip
+            self.forwarder.oti_ip = ip
+            self.forwarder.save_config()
+
+    def _on_oti_port_changed(self):
+        try:
+            p = int(self._oti_port.text())
+            if 1 <= p <= 65535:
+                self.oti_sender.port = p
+                self.forwarder.oti_port = p
+                self.forwarder.save_config()
+        except ValueError:
+            pass
+
+    def _on_parsed_packet(self, data: dict):
+        """Enrich FreeD data with calibrated lens values then forward to OTI."""
+        try:
+            r = self.receiver
+            if 'zoom' in data:
+                data['focal_length_mm']  = r.interpolate_zoom(data['zoom'])
+            if 'focus' in data:
+                data['focus_distance_m'] = r.interpolate_focus(data['focus'])
+        except Exception as e:
+            print(f'[OTI] lens enrich error: {e}', flush=True)
+        self.oti_sender.send(data, self.ltc_reader, self.forwarder.tc_fps)
 
     # ------------------------------------------------------------------
     # Receiver (background thread)
@@ -1171,6 +1454,8 @@ class FreeDDashboard(QMainWindow):
             self.lbl_status.setStyleSheet(f'color: {self.RED}; background: transparent;')
             return
 
+        self.receiver.on_packet = lambda raw: self.forwarder.forward(raw, self.ltc_reader)
+        self.receiver.on_packet_parsed = self._on_parsed_packet
         self.recv_thread = threading.Thread(
             target=self.receiver.receive_loop,
             daemon=True,
@@ -1206,6 +1491,16 @@ class FreeDDashboard(QMainWindow):
                 self.lbl_status.setStyleSheet(f'color: {self.RED}; background: transparent;')
             except Exception:
                 pass
+        self._update_fwd_ui()
+
+    def _update_fwd_ui(self):
+        try:
+            self._fwd_count_lbl.setText(
+                f'Forwarded: {self.forwarder.packets_forwarded:,} pkts')
+            self._tc_preview_lbl.setText(
+                self.forwarder.current_tc_str(self.ltc_reader))
+        except Exception:
+            pass
 
     def _update(self):
         if self.receiver is None:
@@ -1282,8 +1577,12 @@ class FreeDDashboard(QMainWindow):
             self.lbl_focus.setText(f'{focus_distance:.2f}m  {feet}ft {frac_in:.1f}in  [{data["focus"]}]')
             self.lbl_focus.setStyleSheet(f'color: {lens_color}; background: transparent;')
 
-        # Timecode
-        tc = r.parse_timecode(data['spare'], 24.0)
+        # Timecode — prefer extended block (bytes 29–32) for full H:M:S:F
+        ext = data.get('ext_tc')
+        if ext:
+            tc = f'{ext[0]:02d}:{ext[1]:02d}:{ext[2]:02d}:{ext[3]:02d}'
+        else:
+            tc = r.parse_timecode(data['spare'], 1.0)
         self.lbl_tc.setText(tc or '--:--:--:--')
 
         # Stats
@@ -1438,6 +1737,10 @@ class FreeDDashboard(QMainWindow):
 
     def closeEvent(self, event):
         self._timer.stop()
+        self.ltc_reader.stop()
+        self.forwarder.save_config()
+        self.forwarder.close()
+        self.oti_sender.close()
         if self.receiver:
             self.receiver.running = False
             if self.receiver.socket:
