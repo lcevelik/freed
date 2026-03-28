@@ -61,6 +61,12 @@ if sys.platform == 'win32' and 'pytest' not in sys.modules:
         _devnull = open(os.devnull, 'w')
         sys.stdout = _devnull
         sys.stderr = _devnull
+    # Set Windows timer resolution to 1ms so packet interval measurements
+    # reflect the actual source signal rather than the default 15.6ms OS tick.
+    try:
+        ctypes.windll.winmm.timeBeginPeriod(1)
+    except Exception:
+        pass
 
 
 
@@ -2030,7 +2036,7 @@ class FreeDDashboard(QMainWindow):
                 c = self.YELLOW
             else:
                 c = self.RED
-            lbl.setText(f'{std_mm:.3f}')
+            lbl.setText(f'{std_mm:.5f}')
             lbl.setStyleSheet(f'color: {c}; background: transparent;')
 
         # ── Rotation noise ─────────────────────────────────────────────
@@ -2048,7 +2054,7 @@ class FreeDDashboard(QMainWindow):
                 c = self.YELLOW
             else:
                 c = self.RED
-            lbl.setText(f'{std_deg:.4f}')
+            lbl.setText(f'{std_deg:.6f}')
             lbl.setStyleSheet(f'color: {c}; background: transparent;')
 
     # ------------------------------------------------------------------
@@ -2059,6 +2065,11 @@ class FreeDDashboard(QMainWindow):
         self._timer.stop()
         self.ltc_reader.stop()
         self.forwarder.save_config()
+        if sys.platform == 'win32':
+            try:
+                ctypes.windll.winmm.timeEndPeriod(1)
+            except Exception:
+                pass
         self.forwarder.close()
         self.oti_sender.close()
         if self.receiver:
