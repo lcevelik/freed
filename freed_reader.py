@@ -318,7 +318,10 @@ class FreeDForwarder:
         wire = ((h & 0x1F) << 11) | ((m & 0x3F) << 5) | ((s >> 1) & 0x1F)
         raw[26] = (wire >> 8) & 0xFF
         raw[27] =  wire       & 0xFF
-        raw[28] = (0x40 - sum(raw[:28])) & 0xFF
+        checksum = 0
+        for b in raw[:28]:
+            checksum ^= b
+        raw[28] = checksum
         # Bytes 29–32: extended TC block — full H:M:S:F, one byte each
         raw += bytearray([h & 0xFF, m & 0xFF, s & 0xFF, f & 0xFF])
         return raw
@@ -391,6 +394,8 @@ class FreeDForwarder:
             ]
             self.tc_inject     = True
             self.tc_source     = 'auto'   # resolved in FreeDDashboard.__init__
+            self.tc_fps        = 25.0
+            self.ltc_connector = 2
             self.oti_enabled   = False
             self.oti_ip        = '127.0.0.1'
             self.oti_port      = 55555
@@ -422,9 +427,10 @@ class FreeDDashboard(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.receiver     = None
-        self.recv_thread  = None
-        self.forwarder    = FreeDForwarder()
+        self.receiver        = None
+        self.recv_thread     = None
+        self._cached_ip_str  = None
+        self.forwarder       = FreeDForwarder()
         self._active_port = self.forwarder.listen_port
         self.oti_sender   = OpenTrackIOSender()
         # Apply persisted OTI settings (forwarder.load_config() already ran)
@@ -440,7 +446,7 @@ class FreeDDashboard(QMainWindow):
         if self.forwarder.tc_source == 'auto':
             self.forwarder.tc_source = 'bluefish' if self.ltc_reader.available else 'system'
         self._build_ui()
-        self._start_receiver()
+        self._start_receiver(self._active_port)
         self.ltc_reader.start()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._do_update)
@@ -797,13 +803,13 @@ class FreeDDashboard(QMainWindow):
             (self.DIM,    '--',       'Checksum'),
         ]
 
-        mono = QFont(_FONT_MONO, 10)
+        self._pm_font = QFont(_FONT_MONO, 10)
         for i, (color, hex_ph, field) in enumerate(rows):
             qc = QColor(color)
             for col, text in enumerate([hex_ph, field, '---', '---']):
                 item = QTableWidgetItem(text)
                 item.setForeground(qc)
-                item.setFont(mono)
+                item.setFont(self._pm_font)
                 tbl.setItem(i, col, item)
             tbl.setRowHeight(i, 26)
 
@@ -1521,16 +1527,17 @@ class FreeDDashboard(QMainWindow):
         addr = self.receiver.latest_addr
 
         if data is None:
-            try:
-                all_ips = sorted({
-                    info[4][0]
-                    for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
-                    if not info[4][0].startswith('127.')
-                })
-                ip_str = '  /  '.join(all_ips) if all_ips else '0.0.0.0'
-            except Exception:
-                ip_str = '0.0.0.0'
-            self.lbl_status.setText(f'● LISTENING :45000  [{ip_str}]')
+            if self._cached_ip_str is None:
+                try:
+                    all_ips = sorted({
+                        info[4][0]
+                        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+                        if not info[4][0].startswith('127.')
+                    })
+                    self._cached_ip_str = '  /  '.join(all_ips) if all_ips else '0.0.0.0'
+                except Exception:
+                    self._cached_ip_str = '0.0.0.0'
+            self.lbl_status.setText(f'● LISTENING :{self._active_port}  [{self._cached_ip_str}]')
             self.lbl_status.setStyleSheet(f'color: {self.CYAN}; background: transparent;')
             return
 
@@ -1683,7 +1690,7 @@ class FreeDDashboard(QMainWindow):
                  'Checksum', f'0x{rb[28]:02X}',
                  'OK' if data['checksum_valid'] else 'MISMATCH'),
             ]
-            mono = QFont(_FONT_MONO, 10)
+            mono = self._pm_font
             for i, (hx, field, raw_val, decoded) in enumerate(map_rows):
                 qc = QColor(self._pm_colors[i])
                 for col, text in enumerate([hx, field, raw_val, decoded]):
