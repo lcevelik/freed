@@ -8,7 +8,7 @@ Author  : Libor Cevelik
 Copyright (c) 2026 Libor Cevelik. All rights reserved.
 """
 
-__version__   = 'v1.9'
+__version__   = 'v1.9.1'
 __author__    = 'Libor Cevelik'
 __copyright__ = 'Copyright (c) 2026 Libor Cevelik'
 
