@@ -271,10 +271,20 @@ class FreeDReceiver:
 
     def receive_loop(self):
         """Main receive loop"""
+        # Raise thread priority on Windows to reduce OS scheduling jitter
+        if sys.platform == 'win32':
+            try:
+                import ctypes
+                ctypes.windll.kernel32.SetThreadPriority(
+                    ctypes.windll.kernel32.GetCurrentThread(), 2)  # THREAD_PRIORITY_HIGHEST
+            except Exception:
+                pass
+
         try:
             while self.running:
                 try:
                     data, addr = self.socket.recvfrom(1024)
+                    recv_time = time.monotonic()  # timestamp immediately at receive
                 except socket.timeout:
                     continue  # no data yet — keep waiting, don't kill the thread
 
@@ -290,7 +300,7 @@ class FreeDReceiver:
                 parsed_data = self.parser.parse(data)
 
                 if parsed_data:
-                    self.display_data(parsed_data, addr)
+                    self.display_data(parsed_data, addr, recv_time=recv_time)
                 else:
                     if not self.debug:
                         print(f"\nInvalid packet from {addr[0]}:{addr[1]} - Size: {len(data)} bytes - Hex: {data[:10].hex(' ')}...")
@@ -314,7 +324,7 @@ class FreeDReceiver:
             print(f"Error in receive loop: {e}")
             self.stop()
 
-    def display_data(self, data: dict, addr: tuple):
+    def display_data(self, data: dict, addr: tuple, recv_time: float = None):
         """Display parsed FreeD data"""
         # Build output buffer to reduce flicker
         if self.clear_screen:
@@ -489,8 +499,8 @@ class FreeDReceiverGUI(FreeDReceiver):
         self.on_packet         = None               # optional callback(raw_bytes)
         self.on_packet_parsed  = None               # optional callback(data_dict)
 
-    def display_data(self, data: dict, addr: tuple):
-        now = time.monotonic()
+    def display_data(self, data: dict, addr: tuple, recv_time: float = None):
+        now = recv_time if recv_time is not None else time.monotonic()
         if self._last_packet_time is not None:
             interval = (now - self._last_packet_time) * 1000.0
             # Gap >2s means we just reconnected — reset history so fps is clean
