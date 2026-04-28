@@ -1991,23 +1991,41 @@ class FreeDDashboard(QMainWindow):
         self._jitter_stat_labels['PEAK  ±'].setText(f'±{peak:.2f} ms')
         self._jitter_stat_labels['RFC JITTER'].setText(f'{rfc:.2f} ms')
 
-        # Health assessment based on RFC jitter (packet timing tolerance for LED volumes)
-        if rfc < 1.0:
-            health_color = self.GREEN
-            health_title = 'IDEAL'
-            health_sub   = f'RFC jitter {rfc:.2f} ms — safe for LED volume, no visible judder expected'
-        elif rfc < 3.0:
-            health_color = self.YELLOW
-            health_title = 'ACCEPTABLE'
-            health_sub   = f'RFC jitter {rfc:.2f} ms — minor timing variation, monitor on fast pans'
-        elif rfc < 5.0:
-            health_color = self.ORANGE
-            health_title = 'MARGINAL'
-            health_sub   = f'RFC jitter {rfc:.2f} ms — approaching problematic, check network/switch'
+        # Health assessment based on RFC jitter and genlock state
+        is_locked = len(set(r._gl_phase_history)) > 1
+
+        if is_locked:
+            # Genlocked: frame alignment is handled by sync signal — timing jitter is far less critical
+            if rfc < 5.0:
+                health_color = self.GREEN
+                health_title = 'GOOD  ·  GENLOCKED'
+                health_sub   = f'RFC jitter {rfc:.2f} ms — frame-aligned via genlock, timing offset is compensated'
+            elif rfc < 15.0:
+                health_color = self.YELLOW
+                health_title = 'ACCEPTABLE  ·  GENLOCKED'
+                health_sub   = f'RFC jitter {rfc:.2f} ms — genlocked but high transport jitter, check network path'
+            else:
+                health_color = self.ORANGE
+                health_title = 'MARGINAL  ·  GENLOCKED'
+                health_sub   = f'RFC jitter {rfc:.2f} ms — genlocked but excessive jitter may cause missed frames'
         else:
-            health_color = self.RED
-            health_title = 'PROBLEMATIC'
-            health_sub   = f'RFC jitter {rfc:.2f} ms — visible judder likely on LED wall, fix network'
+            # Free-running: strict thresholds apply
+            if rfc < 1.0:
+                health_color = self.GREEN
+                health_title = 'IDEAL'
+                health_sub   = f'RFC jitter {rfc:.2f} ms — safe for LED volume, no visible judder expected'
+            elif rfc < 3.0:
+                health_color = self.YELLOW
+                health_title = 'ACCEPTABLE'
+                health_sub   = f'RFC jitter {rfc:.2f} ms — minor timing variation, monitor on fast pans'
+            elif rfc < 5.0:
+                health_color = self.ORANGE
+                health_title = 'MARGINAL'
+                health_sub   = f'RFC jitter {rfc:.2f} ms — approaching problematic, check network/switch'
+            else:
+                health_color = self.RED
+                health_title = 'PROBLEMATIC  ·  NOT GENLOCKED'
+                health_sub   = f'RFC jitter {rfc:.2f} ms — visible judder likely on LED wall, fix network or add genlock'
 
         self._jitter_health_dot.setStyleSheet(f'color: {health_color}; background: transparent;')
         self._jitter_health_lbl.setText(health_title)
