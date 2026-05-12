@@ -2,7 +2,7 @@
 
 A PyQt6 dark-theme GUI application for receiving, parsing, and analysing camera tracking data from the **FreeD (D1) protocol** over UDP.
 
-![Version](https://img.shields.io/badge/version-v1.9.1-orange) ![Python](https://img.shields.io/badge/Python-3.8%2B-blue) ![PyQt6](https://img.shields.io/badge/PyQt6-6.x-green) ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
+![Version](https://img.shields.io/badge/version-v2.0.0-orange) ![Python](https://img.shields.io/badge/Python-3.8%2B-blue) ![PyQt6](https://img.shields.io/badge/PyQt6-6.x-green) ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
 
 ---
 
@@ -213,6 +213,20 @@ Output: `dist\FreeDReader_v1.9.1.exe` (~50 MB, fully self-contained, no Python r
 ---
 
 ## Changelog
+
+### v2.0.0 — 2026-05-12
+
+**Project restructure**
+
+- Source files reorganised into subfolders: `src/` (protocol, forwarder, LTC reader, OpenTrackIO, UI utils), `simulators/`, `scripts/`, `specs/`, `docs/`
+- Extracted shared font selection and Windows stdout/stderr redirect into `src/ui_utils.py` — eliminates copy-pasted boilerplate across all GUI files
+- `BluefishLTCReader` moved to `src/ltc_reader.py`; `FreeDForwarder` moved to `src/forwarder.py`
+- Removed unused `import struct` from forwarder; removed dead `pyqtgraph` import from main module
+- Fixed module docstring version (was `v1.0`); updated to reflect dashboard purpose
+- `scripts/BUILD_EXECUTABLE.bat` now uses the versioned spec; removed hardcoded Python path from `run_gui.bat`
+- Obsolete spec files archived to `specs/`; `freed_forwarder_config.json` removed from git tracking
+
+---
 
 ### v1.9.1 — 2026-05-12
 

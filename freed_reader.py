@@ -4,12 +4,12 @@ FreeD Dashboard
 Receives, parses, and analyses FreeD D1 camera tracking data over UDP.
 Provides forwarding, TC injection, and OpenTrackIO output.
 
-Version : v1.9.1
+Version : v2.0.0
 Author  : Libor Cevelik
 Copyright (c) 2026 Libor Cevelik. All rights reserved.
 """
 
-__version__   = 'v1.9.1'
+__version__   = 'v2.0.0'
 __author__    = 'Libor Cevelik'
 __copyright__ = 'Copyright (c) 2026 Libor Cevelik'
 
