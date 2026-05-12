@@ -124,6 +124,23 @@ class FreeDParser:
 class FreeDReceiver:
     """UDP receiver for FreeD protocol data"""
 
+    # Lens calibration tables for piecewise-linear interpolation
+    # Fujinon Premista 28-100mm (raw = value × 1000)
+    zoom_calibration = [
+        (28000,   28.0),
+        (35000,   35.0),
+        (50000,   50.0),
+        (70000,   70.0),
+        (100000, 100.0),
+    ]
+    focus_calibration = [
+        (800,    0.8),
+        (892,    0.892),
+        (1299,   1.299),
+        (4170,   4.170),
+        (629000, 629.0),
+    ]
+
     def __init__(self, host: str = '0.0.0.0', port: int = 45000, debug: bool = False, step_by_step: bool = False, delay: float = 0.0, ignore_checksum: bool = False, timecode_fps: float = None, convert_units: bool = False, clear_screen: bool = False):
         self.host = host
         self.port = port
@@ -150,73 +167,25 @@ class FreeDReceiver:
         self.rotation_scale = 1.0 / 32768.0  # raw / 32768 = degrees
         self.position_scale = 1.0 / 64.0     # raw / 64.0 = millimeters
 
-        # Zoom: Linear encoding - raw = focal_length × 1000
-        # Fujinon Premista 28-100mm on your specific camera/tracking setup
-        self.zoom_calibration = [
-            (28000, 28.0),    # 28mm wide angle
-            (35000, 35.0),    # 35mm
-            (50000, 50.0),    # 50mm
-            (70000, 70.0),    # 70mm
-            (100000, 100.0)   # 100mm telephoto
-        ]
-
-        # Focus: Linear encoding - raw = distance × 1000
-        # Fujinon Premista 28-100mm on your specific camera/tracking setup
-        self.focus_calibration = [
-            (800, 0.8),       # 0.8m MOD (Minimum Object Distance)
-            (892, 0.892),     # 0.892m
-            (1299, 1.299),    # 1.299m
-            (4170, 4.170),    # 4.170m
-            (629000, 629.0)   # 629m (infinity/far focus)
-        ]
+    @staticmethod
+    def _interpolate(calibration, raw_value: float) -> float:
+        if raw_value <= calibration[0][0]:
+            return calibration[0][1]
+        if raw_value >= calibration[-1][0]:
+            return calibration[-1][1]
+        for i in range(len(calibration) - 1):
+            raw_lo, val_lo = calibration[i]
+            raw_hi, val_hi = calibration[i + 1]
+            if raw_lo <= raw_value <= raw_hi:
+                t = (raw_value - raw_lo) / (raw_hi - raw_lo)
+                return val_lo + t * (val_hi - val_lo)
+        return calibration[0][1]
 
     def interpolate_zoom(self, raw_value: float) -> float:
-        """
-        Interpolate focal length using measured calibration points
-        Uses piecewise linear interpolation between calibration points
-        """
-        # Handle edge cases
-        if raw_value <= self.zoom_calibration[0][0]:
-            return self.zoom_calibration[0][1]
-        if raw_value >= self.zoom_calibration[-1][0]:
-            return self.zoom_calibration[-1][1]
-
-        # Find the two calibration points to interpolate between
-        for i in range(len(self.zoom_calibration) - 1):
-            raw_lower, zoom_lower = self.zoom_calibration[i]
-            raw_upper, zoom_upper = self.zoom_calibration[i + 1]
-
-            if raw_lower <= raw_value <= raw_upper:
-                # Linear interpolation between calibration points
-                t = (raw_value - raw_lower) / (raw_upper - raw_lower)
-                return zoom_lower + t * (zoom_upper - zoom_lower)
-
-        # Fallback (shouldn't reach here)
-        return self.zoom_calibration[0][1]
+        return self._interpolate(self.zoom_calibration, raw_value)
 
     def interpolate_focus(self, raw_value: float) -> float:
-        """
-        Interpolate focus distance using measured calibration points
-        Uses piecewise linear interpolation between calibration points
-        """
-        # Handle edge cases
-        if raw_value <= self.focus_calibration[0][0]:
-            return self.focus_calibration[0][1]
-        if raw_value >= self.focus_calibration[-1][0]:
-            return self.focus_calibration[-1][1]
-
-        # Find the two calibration points to interpolate between
-        for i in range(len(self.focus_calibration) - 1):
-            raw_lower, focus_lower = self.focus_calibration[i]
-            raw_upper, focus_upper = self.focus_calibration[i + 1]
-
-            if raw_lower <= raw_value <= raw_upper:
-                # Linear interpolation between calibration points
-                t = (raw_value - raw_lower) / (raw_upper - raw_lower)
-                return focus_lower + t * (focus_upper - focus_lower)
-
-        # Fallback (shouldn't reach here)
-        return self.focus_calibration[0][1]
+        return self._interpolate(self.focus_calibration, raw_value)
 
     def parse_timecode(self, spare_value: int, fps: float) -> str:
         """
