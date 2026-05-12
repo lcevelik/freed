@@ -28,12 +28,12 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QFont, QColor
 import numpy as np
-from protocol import FreeDParser, FreeDReceiver, FreeDReceiverGUI
-from opentrackio import OpenTrackIOSender
-from ltc_reader import BluefishLTCReader
-from forwarder import FreeDForwarder
+from src.protocol import FreeDParser, FreeDReceiver, FreeDReceiverGUI
+from src.opentrackio import OpenTrackIOSender
+from src.ltc_reader import BluefishLTCReader
+from src.forwarder import FreeDForwarder
 
-from ui_utils import FONT_MONO as _FONT_MONO, FONT_SANS as _FONT_SANS, configure_stdout
+from src.ui_utils import FONT_MONO as _FONT_MONO, FONT_SANS as _FONT_SANS, configure_stdout
 configure_stdout()
 
 # Set Windows timer resolution to 1ms so packet interval measurements

@@ -8,10 +8,14 @@ Author  : Libor Cevelik
 Copyright (c) 2026 Libor Cevelik. All rights reserved.
 """
 
+import os
 import socket
 import struct
 import sys
 import threading
+
+# Allow running from project root or simulators/ subfolder
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFrame, QLabel,
@@ -22,7 +26,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QFont
 
-from ui_utils import FONT_MONO as _FONT_MONO, FONT_SANS as _FONT_SANS, configure_stdout
+from src.ui_utils import FONT_MONO as _FONT_MONO, FONT_SANS as _FONT_SANS, configure_stdout
 configure_stdout()
 
 

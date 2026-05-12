@@ -1,16 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
-
+import os
+PROJ_ROOT = os.path.abspath(os.path.join(SPECPATH, '..'))
 
 a = Analysis(
-    ['freed_reader.py'],
-    pathex=['.'],
+    [os.path.join(PROJ_ROOT, 'freed_reader.py')],
+    pathex=[PROJ_ROOT],
     binaries=[],
     datas=[],
-    hiddenimports=['protocol', 'opentrackio'],
+    hiddenimports=[],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['scipy', 'scipy_openblas64', 'sklearn', 'matplotlib', 'IPython', 'PIL'],
     noarchive=False,
     optimize=0,
 )
@@ -22,7 +23,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='FreeDReader_v1.5',
+    name='FreeD_Reader_V1.9.1',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

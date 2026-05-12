@@ -9,8 +9,8 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from protocol import FreeDParser, FreeDReceiver, FreeDReceiverGUI
-from opentrackio import OpenTrackIOSender
+from src.protocol import FreeDParser, FreeDReceiver, FreeDReceiverGUI
+from src.opentrackio import OpenTrackIOSender
 
 
 # ---------------------------------------------------------------------------
