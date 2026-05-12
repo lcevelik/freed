@@ -2,7 +2,7 @@
 
 A PyQt6 dark-theme GUI application for receiving, parsing, and analysing camera tracking data from the **FreeD (D1) protocol** over UDP.
 
-![Version](https://img.shields.io/badge/version-v1.9-orange) ![Python](https://img.shields.io/badge/Python-3.8%2B-blue) ![PyQt6](https://img.shields.io/badge/PyQt6-6.x-green) ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
+![Version](https://img.shields.io/badge/version-v1.9.1-orange) ![Python](https://img.shields.io/badge/Python-3.8%2B-blue) ![PyQt6](https://img.shields.io/badge/PyQt6-6.x-green) ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
 
 ---
 
@@ -12,13 +12,15 @@ A PyQt6 dark-theme GUI application for receiving, parsing, and analysing camera 
 - Apple-dark PyQt6 GUI with four tabs:
   - **Dashboard** — live rotation, position, lens, genlock, timecode, and status
   - **Packet Map** — byte-by-byte protocol breakdown with decoded values
-  - **Jitter** — timing health banner, numeric noise monitoring, and full reference guide
-  - **Settings** — configure UDP port, destinations, frame rate, and OpenTrackIO output
+  - **Jitter** — timing health banner, numeric noise monitoring, genlock health, and full reference guide
+  - **Settings** — configure UDP port, destinations, frame rate, timecode source, and OpenTrackIO output
 - Correct checksum validation — device-verified formula `(byte26 + byte27 + byte28) & 0xFF == 0xF6`
 - Parses 29-byte FreeD D1 packets with unit conversion (degrees, meters, mm)
-- Timecode decoding from spare bytes (24 fps default)
-- Genlock phase detection and lock status
+- Timecode from system clock (H:M:S:F) displayed live in the Timing tab and Settings
+- Genlock phase detection, lock status, and genlock-aware jitter health assessment
 - **OpenTrackIO v1.0.1** output — forwards tracking data as JSON over UDP
+- **OpenTrackIO Simulator** — send synthetic OpenTrackIO JSON for testing without real hardware
+- Send rate automatically follows configured timecode FPS
 - Settings persist across restarts via `%APPDATA%\FreeDReader\`
 - Standalone `.exe` build via PyInstaller (no Python required on target)
 - Included **FreeD Simulator** for development and testing without real hardware
@@ -41,7 +43,7 @@ pip install PyQt6 numpy
 
 ### Running the portable executable
 
-No dependencies — copy `dist\FreeDReader_v1.9.exe` to any Windows machine and run it.
+No dependencies — copy `dist\FreeDReader_v1.9.1.exe` to any Windows machine and run it.
 
 ---
 
@@ -162,15 +164,16 @@ Optional 4-byte extension (bytes 29–32): full H:M:S:F timecode block, injected
 
 ```
 freed/
-├── freed_reader.py        # Main GUI application + forwarder
-├── protocol.py            # FreeDParser, FreeDReceiver, FreeDReceiverGUI
-├── opentrackio.py         # OpenTrackIOSender (JSON over UDP, v1.0.1)
-├── freed_simulator.py     # Test packet generator
+├── freed_reader.py          # Main GUI application + forwarder
+├── protocol.py              # FreeDParser, FreeDReceiver, FreeDReceiverGUI
+├── opentrackio.py           # OpenTrackIOSender (JSON over UDP, v1.0.1)
+├── freed_simulator.py       # FreeD test packet generator
+├── opentrackio_simulator.py # OpenTrackIO JSON test sender
 ├── tests/
-│   └── test_freed.py      # 48 unit tests
-├── FreeDReader_v1.9.spec  # PyInstaller build spec
+│   └── test_freed.py        # 48 unit tests
+├── FreeD_Reader_V1.9.1.spec # PyInstaller build spec
 └── dist/
-    └── FreeDReader_v1.9.exe  # Standalone executable
+    └── FreeDReader_v1.9.1.exe  # Standalone executable
 ```
 
 ---
@@ -179,10 +182,10 @@ freed/
 
 ```bash
 pip install pyinstaller
-pyinstaller FreeDReader_v1.9.spec
+pyinstaller FreeD_Reader_V1.9.1.spec
 ```
 
-Output: `dist\FreeDReader_v1.9.exe` (~50 MB, fully self-contained, no Python required)
+Output: `dist\FreeDReader_v1.9.1.exe` (~50 MB, fully self-contained, no Python required)
 
 ---
 
@@ -197,7 +200,7 @@ Output: `dist\FreeDReader_v1.9.exe` (~50 MB, fully self-contained, no Python req
 - Open the **Settings** tab, enter the correct port, and click **Apply**
 
 **Checksum shows MISMATCH**
-- Upgrade to v1.9 — earlier versions used an incorrect XOR algorithm. v1.9 uses the correct device-verified formula.
+- Upgrade to v1.9+ — earlier versions used an incorrect XOR algorithm. v1.9+ uses the correct device-verified formula.
 
 **High jitter (10 ms+)**
 - Windows timer resolution: v1.9 sets 1 ms resolution at startup automatically
@@ -210,6 +213,25 @@ Output: `dist\FreeDReader_v1.9.exe` (~50 MB, fully self-contained, no Python req
 ---
 
 ## Changelog
+
+### v1.9.1 — 2026-05-12
+
+**Bug fixes**
+
+- **Jitter measurement accuracy** — packet timestamps now captured immediately at `recvfrom()` (before any processing); receive thread priority raised to eliminate OS scheduling noise
+- **Control bar layout** — wider port/rate spinboxes and extra padding prevent field clipping at all window sizes; uniform field widths (IP 160 px, port/rate 120 px)
+
+**New features**
+
+- **OpenTrackIO Simulator** — standalone `opentrackio_simulator.py` sends synthetic OpenTrackIO JSON over UDP for pipeline testing without a camera
+- **Live timecode readout in Timing tab** — Settings → Timecode sub-tab now shows the current running H:M:S:F so you can verify the source without switching tabs
+- **Timecode simplified** — system clock is the sole source (manual spinbox input removed); Bluefish444 LTC remains available as an optional external source
+- **Send rate auto-sync** — the forwarder send rate automatically follows the configured timecode FPS; no separate rate field needed
+- **Genlock-aware jitter health** — the Jitter health banner now factors in genlock lock state when determining the overall signal quality rating
+- **F-stop / T-stop sliders in Lens tab** — interactive sliders for f-stop and t-stop values alongside the numeric readout
+- New PyInstaller spec files: `FreeD_Reader_V1.0.spec` and `FreeD_Reader_V1.9.1.spec`
+
+---
 
 ### v1.9 — 2026-03-28
 
