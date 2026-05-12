@@ -1732,6 +1732,15 @@ def main_gui():
     app.setStyle('Fusion')   # ensures custom stylesheets render correctly on Windows
     app.setApplicationName('FreeD Dashboard')
     window = FreeDDashboard()
+    # Centre the window on the primary screen to avoid off-screen placement
+    # on multi-monitor or high-DPI setups.
+    screen = app.primaryScreen()
+    if screen:
+        available = screen.availableGeometry()
+        window.move(
+            available.x() + (available.width()  - window.width())  // 2,
+            available.y() + (available.height() - window.height()) // 2,
+        )
     window.show()
     window.raise_()
     window.activateWindow()
