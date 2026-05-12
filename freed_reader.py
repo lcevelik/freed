@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-FreeD Protocol Reader
-Reads and parses FreeD camera tracking data from UDP socket
+FreeD Dashboard
+Receives, parses, and analyses FreeD D1 camera tracking data over UDP.
+Provides forwarding, TC injection, and OpenTrackIO output.
 
-Version : v1.0
+Version : v1.9.1
 Author  : Libor Cevelik
 Copyright (c) 2026 Libor Cevelik. All rights reserved.
 """
@@ -32,33 +33,12 @@ from opentrackio import OpenTrackIOSender
 from ltc_reader import BluefishLTCReader
 from forwarder import FreeDForwarder
 
-# Platform-aware font selection
-if sys.platform == 'darwin':
-    _FONT_MONO = 'Menlo'
-    _FONT_SANS = 'SF Pro Text'
-elif sys.platform == 'win32':
-    _FONT_MONO = 'Consolas'
-    _FONT_SANS = 'Segoe UI'
-else:                            # Linux / other
-    _FONT_MONO = 'DejaVu Sans Mono'
-    _FONT_SANS = 'DejaVu Sans'
+from ui_utils import FONT_MONO as _FONT_MONO, FONT_SANS as _FONT_SANS, configure_stdout
+configure_stdout()
 
-# Configure UTF-8 encoding for Windows console.
-# In --noconsole (windowed) mode stdout/stderr are None; redirect to devnull
-# so that any print() call anywhere in the code never raises an AttributeError
-# and silently kills a background thread.
-if sys.platform == 'win32' and 'pytest' not in sys.modules:
-    try:
-        import io
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
-    except (AttributeError, TypeError):
-        # Windowed mode — no console attached; write to devnull instead of None
-        _devnull = open(os.devnull, 'w')
-        sys.stdout = _devnull
-        sys.stderr = _devnull
-    # Set Windows timer resolution to 1ms so packet interval measurements
-    # reflect the actual source signal rather than the default 15.6ms OS tick.
+# Set Windows timer resolution to 1ms so packet interval measurements
+# reflect the actual source signal rather than the default 15.6ms OS tick.
+if sys.platform == 'win32':
     try:
         ctypes.windll.winmm.timeBeginPeriod(1)
     except Exception:

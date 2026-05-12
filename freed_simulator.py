@@ -22,27 +22,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QFont
 
-# ── Fonts ──────────────────────────────────────────────────────────────────
-if sys.platform == 'darwin':
-    _FONT_MONO = 'Menlo'
-    _FONT_SANS = 'SF Pro Text'
-elif sys.platform == 'win32':
-    _FONT_MONO = 'Consolas'
-    _FONT_SANS = 'Segoe UI'
-else:
-    _FONT_MONO = 'DejaVu Sans Mono'
-    _FONT_SANS = 'DejaVu Sans'
-
-# Redirect stdout/stderr on Windows windowed builds
-if sys.platform == 'win32':
-    try:
-        import io
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
-    except AttributeError:
-        import os
-        sys.stdout = open(os.devnull, 'w', encoding='utf-8')
-        sys.stderr = open(os.devnull, 'w', encoding='utf-8')
+from ui_utils import FONT_MONO as _FONT_MONO, FONT_SANS as _FONT_SANS, configure_stdout
+configure_stdout()
 
 
 # ── FreeD Packet Builder ───────────────────────────────────────────────────

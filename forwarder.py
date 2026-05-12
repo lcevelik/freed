@@ -5,7 +5,6 @@ UDP destinations. Config is persisted to %APPDATA%\\FreeDReader\\freed_forwarder
 import json
 import os
 import socket
-import struct
 import sys
 import threading
 import uuid

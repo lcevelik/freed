@@ -9,3 +9,6 @@ dist/
 
 # Stray files
 nul
+
+# Local dev config (real config lives in %APPDATA%\FreeDReader\)
+freed_forwarder_config.json
