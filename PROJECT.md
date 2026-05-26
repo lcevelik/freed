@@ -1,35 +1,38 @@
-# Project: freed
-
-<!-- 
-Project Tracker — keep these H2 headings exactly as-is.
-The tracker parses them to populate Kanban columns.
-Edit the tasks below. Use - [ ] for open, - [x] for done.
--->
-
 ## Goals
 
-- [ ] Define project goals here (target: 2026-07-01)
+- [ ] Release FreeD Dashboard v2.0 with OpenTrackIO v1.0.1 support — 2026-06-15
+- [ ] Add multi-camera tracking support and comparison views — 2026-08-01
+- [ ] Publish cross-platform builds (Linux/macOS) — 2026-09-01
 
 ## In Progress
 
-- [ ] Current active work
+- [ ] Validate OpenTrackIO v1.0.1 JSON output against external receivers
+- [ ] Improve jitter analysis accuracy and genlock health reporting
 
 ## To Do
 
-- [ ] Planned tasks
+- [ ] Add support for tracking multiple FreeD sources simultaneously
+- [ ] Implement data recording and playback (export to CSV/JSON)
+- [ ] Add Linux and macOS platform support
+- [ ] Create OpenTrackIO output configuration UI for custom field mapping
+- [ ] Add network diagnostics tab for UDP packet loss monitoring
 
 ## Done
 
-- [x] Completed work
+- [x] Real-time FreeD D1 packet reception over UDP with checksum validation
+- [x] PyQt6 dark-theme GUI with Dashboard, Packet Map, Jitter, and Settings tabs
+- [x] OpenTrackIO v1.0.1 JSON forwarding and simulator for testing
 
 ## Blocked
 
-- [ ] Blocked items (add reason)
+
 
 ## Releases
 
-- v0.1.0 — planned 2026-06-01 — Initial release
+- v2.0.0 — current — FreeD Dashboard with OpenTrackIO output and simulator
+- v2.1.0 — planned 2026-09-01 — Multi-camera support and cross-platform builds
 
 ## Notes
 
-- Project created: 2026-05-26
+- Checksum formula verified with real hardware: (byte26 + byte27 + byte28) & 0xFF == 0xF6
+- Settings persist in %APPDATA%\FreeDReader\; standalone .exe via PyInstaller (no Python required)
