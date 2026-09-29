@@ -76,8 +76,8 @@ def build_freed_packet(
         pkt[26] = 0x00
     pkt[27] = 0x00
 
-    # Device checksum: (byte26 + byte27 + byte28) & 0xFF == 0xF6
-    pkt[28] = (0xF6 - pkt[26] - pkt[27]) & 0xFF
+    # Standard FreeD checksum: (0x40 - sum of bytes 0-27) & 0xFF
+    pkt[28] = (0x40 - sum(pkt[:28])) & 0xFF
 
     return bytes(pkt)
 

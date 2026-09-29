@@ -187,9 +187,22 @@ class TestOTIToFreeD(unittest.TestCase):
         self.assertAlmostEqual(d['roll'] / 32768, t['rotation']['roll'], places=4)
         for axis in 'xyz':
             self.assertAlmostEqual(d['position'][axis] / 64000, t['translation'][axis], places=4)
-        self.assertAlmostEqual(d['zoom'] / 1000,  self.sample['lens']['pinholeFocalLength'], places=3)
-        self.assertAlmostEqual(d['focus'] / 1000, self.sample['lens']['focusDistance'], places=3)
+        # Zoom / focus carry the raw lens encoder counts, like the Ocellus's own FreeD output
+        self.assertEqual(d['zoom'],  self.sample['lens']['rawEncoders']['zoom'])
+        self.assertEqual(d['focus'], self.sample['lens']['rawEncoders']['focus'])
         self.assertEqual(d['camera_id'], self.sample['sourceNumber'])
+
+    def test_standard_checksum(self):
+        pkt = oti_to_freed_packet(self.sample)
+        self.assertEqual(pkt[28], (0x40 - sum(pkt[:28])) & 0xFF)
+        self.assertEqual(self.parsed['checksum_scheme'], 'standard')
+
+    def test_lens_falls_back_to_normalised_encoders(self):
+        del self.sample['lens']['rawEncoders']
+        self.sample['lens']['encoders'] = {'zoom': 0.5, 'focus': 1.0}
+        d = FreeDParser().parse(oti_to_freed_packet(self.sample))
+        self.assertEqual(d['zoom'], round(0.5 * 65535))
+        self.assertEqual(d['focus'], 65535)
 
     def test_genlock_phase_cycles_when_locked(self):
         phases = set()

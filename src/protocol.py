@@ -11,6 +11,17 @@ from collections import deque
 from datetime import datetime
 
 
+def freed_checksum(data: bytes) -> int:
+    """Standard FreeD D1 checksum byte: (0x40 - sum of bytes 0-27) & 0xFF.
+    Used by Sony Ocellus and most FreeD senders/receivers (e.g. Unreal Live Link)."""
+    return (0x40 - sum(data[:28])) & 0xFF
+
+
+def freed_checksum_legacy(data: bytes) -> int:
+    """Legacy scheme seen on an earlier device: bytes 26 + 27 + 28 sum to 0xF6 (mod 256)."""
+    return (0xF6 - data[26] - data[27]) & 0xFF
+
+
 class FreeDParser:
     """Parser for FreeD (D1) protocol data"""
 
@@ -28,16 +39,20 @@ class FreeDParser:
         return int.from_bytes(data[:3], byteorder='big', signed=True)
 
     def calculate_checksum(self, data: bytes) -> int:
-        """
-        Calculate expected checksum byte (byte 28) using the device's scheme:
-        bytes 26 + 27 + 28 must sum to 0xF6 (mod 256).
-        Returns the expected value of byte 28.
-        """
-        return (0xF6 - data[26] - data[27]) & 0xFF
+        """Expected value of byte 28 under the standard FreeD checksum."""
+        return freed_checksum(data)
+
+    def checksum_scheme(self, data: bytes):
+        """'standard' or 'legacy' if byte 28 matches that scheme, else None."""
+        if data[28] == freed_checksum(data):
+            return 'standard'
+        if data[28] == freed_checksum_legacy(data):
+            return 'legacy'
+        return None
 
     def verify_checksum(self, data: bytes) -> bool:
-        """Return True if (byte26 + byte27 + byte28) & 0xFF == 0xF6."""
-        return (data[26] + data[27] + data[28]) & 0xFF == 0xF6
+        """True if byte 28 matches the standard or the legacy checksum."""
+        return self.checksum_scheme(data) is not None
 
     def parse(self, data: bytes) -> dict:
         """
@@ -68,10 +83,11 @@ class FreeDParser:
                 print(f"  ERROR: {error_reason}")
             return None
 
-        # Verify checksum: device uses (byte26 + byte27 + byte28) & 0xFF == 0xF6
+        # Verify checksum: standard (0x40 - sum) or legacy (b26 + b27 + b28 == 0xF6)
         calculated_checksum = self.calculate_checksum(data)
         packet_checksum = data[28]
-        checksum_valid = self.verify_checksum(data)
+        scheme = self.checksum_scheme(data)
+        checksum_valid = scheme is not None
 
         if not checksum_valid:
             if not self.ignore_checksum:
@@ -112,6 +128,7 @@ class FreeDParser:
             'spare_bytes': spare_bytes,
             'ext_tc': ext_tc,
             'checksum_valid': checksum_valid,
+            'checksum_scheme': scheme,
             'checksum_expected': calculated_checksum,
             'checksum_actual': packet_checksum,
             'timestamp': datetime.now().isoformat(),
@@ -557,6 +574,7 @@ class UdpListener:
         self.handlers  = handlers
         self.ip_filter = {}          # proto -> sender IP to lock to ('' / missing = any)
         self.mismatch  = None        # (proto, addr, recv_time) of last wrong-protocol datagram
+        self.tap       = None        # optional fn(data, addr, port, recv_time) — sees every datagram
         self.running   = False
         self.last_error = None
         self.sock      = None
@@ -623,6 +641,12 @@ class UdpListener:
                 self.last_error = str(e)
                 break
 
+            tap = self.tap
+            if tap is not None:
+                try:
+                    tap(data, addr, self.port, recv_time)
+                except Exception as e:
+                    self.last_error = str(e)
             proto = detect_protocol(data)
             self._track(addr, proto, data, recv_time)
             if proto not in self.accept:

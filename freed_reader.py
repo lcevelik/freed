@@ -4,27 +4,29 @@ FreeD Dashboard
 Receives, parses, and analyses FreeD D1 camera tracking data over UDP.
 Provides forwarding, TC injection, and OpenTrackIO output.
 
-Version : v2.0.0
+Version : v3.0.0
 Author  : Libor Cevelik
 Copyright (c) 2026 Libor Cevelik. All rights reserved.
 """
 
-__version__   = 'v2.0.0'
+__version__   = 'v3.0.0'
 __author__    = 'Libor Cevelik'
 __copyright__ = 'Copyright (c) 2026 Libor Cevelik'
 
+import csv
 import ctypes
-import json
 import os
 import socket
 import sys
 import threading
 import time
+from datetime import datetime
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFrame, QLabel,
     QGridLayout, QVBoxLayout, QHBoxLayout, QFormLayout,
     QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
-    QSpinBox, QPushButton, QLineEdit, QComboBox, QTextEdit, QScrollArea,
+    QSpinBox, QPushButton, QLineEdit, QComboBox, QTextEdit, QScrollArea, QSizePolicy,
+    QCheckBox, QFileDialog,
 )
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QFont, QColor
@@ -35,6 +37,8 @@ from src.opentrackio import (OpenTrackIOSender, OpenTrackIOParser, oti_to_freed_
                              oti_timecode, oti_device_label, oti_camera_transform)
 from src.ltc_reader import BluefishLTCReader
 from src.forwarder import FreeDForwarder
+from src.recorder import (Recorder, Recording, analyze, report_csv_rows, EXTENSION as REC_EXT,
+                          STATUS_NAMES, STATUS_LIVE, STATUS_FIXED, STATUS_ZERO, STATUS_MISSING)
 
 from src.ui_utils import FONT_MONO as _FONT_MONO, FONT_SANS as _FONT_SANS, configure_stdout
 configure_stdout()
@@ -77,6 +81,10 @@ class FreeDDashboard(QMainWindow):
         self._sender_labels  = {}                     # addr -> device label
         self._relay_blocked  = False
         self._active_source  = self._resolve_active_source()
+        self.recorder        = Recorder()             # fed by every listener via UdpListener.tap
+        self._recording      = None                   # Recording being analysed
+        self._rec_reports    = []
+        self._rec_unsaved    = False
         self.oti_sender   = OpenTrackIOSender()
         # Apply persisted OTI settings (forwarder.load_config() already ran)
         self.oti_sender.enabled      = self.forwarder.oti_enabled
@@ -235,17 +243,38 @@ class FreeDDashboard(QMainWindow):
         self._build_dashboard(dash)
         tabs.addTab(dash, '  Dashboard  ')
 
-        pmap = QWidget()
-        self._build_packet_map(pmap)
-        tabs.addTab(pmap, '  Packet Map  ')
-
         jitter = QWidget()
         self._build_jitter_tab(jitter)
         tabs.addTab(jitter, '  Jitter  ')
 
-        oti = QWidget()
-        self._build_oti_tab(oti)
-        self._oti_tab_index = tabs.addTab(oti, '  OpenTrackIO  ')
+        # Packet Map › FreeD (byte table) / OpenTrackIO (decoded overview)
+        pmap = QWidget()
+        pmap_layout = QVBoxLayout(pmap)
+        pmap_layout.setContentsMargins(0, 0, 0, 0)
+        pmap_layout.setSpacing(0)
+        self._pmap_sub = QTabWidget()
+        self._pmap_sub.setStyleSheet(f"""
+            QTabWidget::pane {{ border: none; background-color: {self.BG}; }}
+            QTabBar::tab {{
+                background-color: {self.BG}; color: {self.DIM};
+                padding: 6px 16px; border: none; font-size: 12px;
+                font-family: {_FONT_SANS};
+            }}
+            QTabBar::tab:selected {{ color: {self.FG}; border-bottom: 2px solid {self.CYAN}; }}
+            QTabBar::tab:hover {{ color: {self.FG}; }}
+        """)
+        pmap_layout.addWidget(self._pmap_sub)
+        freed_page = QWidget()
+        self._build_packet_map(freed_page)
+        self._pmap_sub.addTab(freed_page, 'FreeD')
+        oti_page = QWidget()
+        self._build_oti_tab(oti_page)
+        self._oti_sub_index = self._pmap_sub.addTab(oti_page, 'OpenTrackIO')
+        self._pmap_tab_index = tabs.addTab(pmap, '  Packet Map  ')
+
+        rec = QWidget()
+        self._build_recorder_tab(rec)
+        self._rec_tab_index = tabs.addTab(rec, '  Recorder  ')
         self._tabs = tabs
 
         settings = QWidget()
@@ -1359,6 +1388,7 @@ class FreeDDashboard(QMainWindow):
         for port, accept in self._listen_plan().items():
             lst = UdpListener(port, accept, handlers)
             lst.ip_filter = self._sender_filter()
+            lst.tap = self.recorder.add
             try:
                 lst.start()
             except OSError as e:
@@ -1871,48 +1901,71 @@ class FreeDDashboard(QMainWindow):
                        'encoders', 'rawEncoders', 'projectionOffset', 'distortion',
                        'distortionOverscan', 'distortionOffset'}
 
+    # Shorter row labels so three cards fit side by side
+    _OTI_SHORT = {'Tracker status': 'Status', 'Focus distance': 'Focus dist.',
+                  'Entrance pupil': 'Entr. pupil', 'Projection offset': 'Proj. offset',
+                  'Distortion offset': 'Dist. offset', 'Checksum errors': 'Checksum err.',
+                  'Decode errors': 'Decode err.'}
+
     def _build_oti_tab(self, parent: QWidget):
+        """Six compact cards in a 3 × 2 grid — sized to fit the default window."""
         outer = QVBoxLayout(parent)
         outer.setContentsMargins(0, 0, 0, 0)
-        scroll = QScrollArea()
+        scroll = QScrollArea()                 # fallback only, for windows below the default size
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         outer.addWidget(scroll)
         body = QWidget()
         scroll.setWidget(body)
         grid = QGridLayout(body)
-        grid.setContentsMargins(10, 10, 10, 10)
-        grid.setSpacing(10)
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 1)
+        grid.setContentsMargins(8, 6, 8, 8)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(8)
+        for col in range(3):
+            grid.setColumnStretch(col, 1)
 
         self._oti_hdr = QLabel('Waiting for OpenTrackIO…')
-        self._oti_hdr.setFont(QFont(_FONT_SANS, 11, QFont.Weight.Bold))
+        self._oti_hdr.setFont(QFont(_FONT_SANS, 10, QFont.Weight.Bold))
         self._oti_hdr.setStyleSheet(f'color: {self.DIM}; background: transparent;')
-        grid.addWidget(self._oti_hdr, 0, 0, 1, 2)
+        grid.addWidget(self._oti_hdr, 0, 0, 1, 3)
 
         self._oti_lbl = {}
         for i, (title, keys) in enumerate(self._OTI_CARDS):
-            w, form = self._card(title)
+            frame = QFrame()
+            frame.setObjectName('card')
+            inner = QVBoxLayout(frame)
+            inner.setContentsMargins(10, 6, 10, 8)
+            inner.setSpacing(3)
+            hdr_lbl = QLabel(title)
+            hdr_lbl.setFont(QFont(_FONT_SANS, 8, QFont.Weight.Bold))
+            hdr_lbl.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+            inner.addWidget(hdr_lbl)
+
+            form_w = QWidget()
+            form_w.setStyleSheet('background: transparent;')
+            form = QFormLayout(form_w)
+            form.setContentsMargins(0, 0, 0, 0)
+            form.setHorizontalSpacing(8)
+            form.setVerticalSpacing(2)
+            form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             color = getattr(self, self._OTI_CARD_COLORS[title])
             for key in keys:
-                v = self._val(color, size=10)
-                v.setWordWrap(True)
+                k = QLabel(self._OTI_SHORT.get(key, key))
+                k.setFont(QFont(_FONT_SANS, 8))
+                k.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+                v = QLabel('---')
+                v.setFont(QFont(_FONT_MONO, 9, QFont.Weight.Bold))
+                v.setStyleSheet(f'color: {color}; background: transparent;')
+                # Never let a long value widen the card — clip it; full text is in the tooltip
+                v.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
                 v.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-                form.addRow(self._key(key), v)
+                form.addRow(k, v)
                 self._oti_lbl[key] = v
-            grid.addWidget(w, 1 + i // 2, i % 2)
-
-        raw_w, raw_form = self._card('RAW JSON  (last sample)')
-        self._oti_json = QTextEdit()
-        self._oti_json.setReadOnly(True)
-        self._oti_json.setMinimumHeight(260)
-        self._oti_json.setFont(QFont(_FONT_MONO, 9))
-        self._oti_json.setStyleSheet(
-            f'QTextEdit {{ background-color: {self.BG}; color: #aaaaaa;'
-            f' border: 1px solid {self.BORDER}; border-radius: 6px; }}')
-        raw_form.addRow(self._oti_json)
-        grid.addWidget(raw_w, 1 + (len(self._OTI_CARDS) + 1) // 2, 0, 1, 2)
+            inner.addWidget(form_w)
+            inner.addStretch()
+            grid.addWidget(frame, 1 + i // 3, i % 3)
+        grid.setRowStretch(1, 1)
+        grid.setRowStretch(2, 1)
 
     @staticmethod
     def _fr(r) -> str:
@@ -1930,10 +1983,17 @@ class FreeDDashboard(QMainWindow):
         return str(v)
 
     @staticmethod
-    def _join(*parts) -> str:
-        return '  ·  '.join(str(p) for p in parts if p not in (None, '')) or '---'
+    def _fps(r) -> str:
+        """Compact frame rate from an OpenTrackIO rational: '24 fps', '23.976 fps'."""
+        if isinstance(r, dict) and r.get('denom'):
+            return f"{round(r['num'] / r['denom'], 3):g} fps"
+        return ''
 
-    def _update_oti_tab(self, full: bool = False):
+    @staticmethod
+    def _join(*parts) -> str:
+        return ' · '.join(str(p) for p in parts if p not in (None, '')) or '---'
+
+    def _update_oti_tab(self):
         s    = self.oti_state
         data = s.latest_data
         f    = self.forwarder
@@ -2013,11 +2073,11 @@ class FreeDDashboard(QMainWindow):
             'Sensor':          sensor,
             'Exposure':        jn('ISO ' + str(cam['isoSpeed']) if 'isoSpeed' in cam else '',
                                   f"{cam['shutterAngle']}°" if 'shutterAngle' in cam else '',
-                                  fr(cam['captureFrameRate']) + ' fps' if 'captureFrameRate' in cam else ''),
+                                  self._fps(cam.get('captureFrameRate'))),
             'Tracker':         f"{strk.get('make', '')} {strk.get('model', '')}".strip() or '---',
             'Tracker S/N':     jn(strk.get('serialNumber'), 'fw ' + strk['firmwareVersion'] if strk.get('firmwareVersion') else ''),
             'Tracker status':  jn(trk.get('status'),
-                                  ('REC' if trk.get('recording') else 'not recording') if 'recording' in trk else '',
+                                  ('REC' if trk.get('recording') else 'not rec') if 'recording' in trk else '',
                                   'slate ' + str(trk['slate']) if trk.get('slate') else ''),
             'Lens':            f"{slen.get('make', '')} {slen.get('model', '')}".strip() or '---',
             'Lens S/N':        jn(slen.get('serialNumber'), 'fw ' + slen['firmwareVersion'] if slen.get('firmwareVersion') else ''),
@@ -2070,7 +2130,10 @@ class FreeDDashboard(QMainWindow):
             'Source':          jn(smp.get('sourceId'), f"#{smp['sourceNumber']}" if 'sourceNumber' in smp else ''),
         }
         for key, text in vals.items():
-            self._oti_lbl[key].setText(text)
+            lbl = self._oti_lbl[key]
+            if lbl.text() != text:
+                lbl.setText(text)
+                lbl.setToolTip(text)
 
         gl = self._oti_lbl['Genlock']
         gl.setStyleSheet(f"color: {self.GREEN if sync.get('locked') else self.RED}; background: transparent;")
@@ -2079,13 +2142,292 @@ class FreeDDashboard(QMainWindow):
             self._oti_lbl[key].setStyleSheet(
                 f'color: {self.ORANGE if bad else self.FG}; background: transparent;')
 
-        if full:
-            text = json.dumps({k: v for k, v in smp.items() if k != '_meta'}, indent=2)
-            if text != self._oti_json.toPlainText():
-                bar = self._oti_json.verticalScrollBar()
-                pos = bar.value()
-                self._oti_json.setPlainText(text)
-                bar.setValue(pos)
+    # ------------------------------------------------------------------
+    # Recorder tab — capture N seconds of raw input, analyse, save / load
+    # ------------------------------------------------------------------
+
+    REC_LENGTHS = [10, 20, 30, 60]
+    REC_DIR = os.path.join(os.path.expanduser('~'), 'Documents', 'FreeD Recordings')
+
+    def _rec_btn_qss(self, filled: bool, color: str) -> str:
+        if filled:
+            return f"""QPushButton {{ background-color: {color}; color: #000000; border: none;
+                border-radius: 6px; padding: 5px 14px; font-family: {_FONT_SANS};
+                font-size: 12px; font-weight: bold; }}
+                QPushButton:disabled {{ background-color: {self.BORDER}; color: {self.DIM}; }}"""
+        return f"""QPushButton {{ background-color: transparent; color: {color};
+            border: 1px solid {color}; border-radius: 6px; padding: 4px 12px;
+            font-family: {_FONT_SANS}; font-size: 12px; }}
+            QPushButton:hover {{ background-color: {self.CARD}; }}
+            QPushButton:disabled {{ color: {self.DIM}; border-color: {self.BORDER}; }}"""
+
+    def _build_recorder_tab(self, parent: QWidget):
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+
+        def _small(text='', color=None):
+            lbl = QLabel(text)
+            lbl.setFont(QFont(_FONT_SANS, 9))
+            lbl.setStyleSheet(f'color: {color or self.DIM}; background: transparent;')
+            return lbl
+
+        # ── Controls ──────────────────────────────────────────────────
+        ctl = QFrame(); ctl.setObjectName('card')
+        ctl_v = QVBoxLayout(ctl); ctl_v.setContentsMargins(14, 10, 14, 10); ctl_v.setSpacing(6)
+        row = QWidget(); row.setStyleSheet('background: transparent;')
+        row_l = QHBoxLayout(row); row_l.setContentsMargins(0, 0, 0, 0); row_l.setSpacing(8)
+
+        row_l.addWidget(_small('Length', self.FG))
+        self._rec_len_combo = QComboBox()
+        self._rec_len_combo.setStyleSheet(self._combo_qss())
+        for s in self.REC_LENGTHS:
+            self._rec_len_combo.addItem(f'{s} s', s)
+        self._rec_len_combo.setCurrentIndex(1)
+        row_l.addWidget(self._rec_len_combo)
+
+        self._rec_btn = QPushButton('● Record')
+        self._rec_btn.setFixedWidth(100)
+        self._rec_btn.setStyleSheet(self._rec_btn_qss(True, self.RED))
+        self._rec_btn.clicked.connect(self._on_record_clicked)
+        row_l.addWidget(self._rec_btn)
+
+        row_l.addSpacing(12)
+        self._rec_load_btn = QPushButton('Load…')
+        self._rec_save_btn = QPushButton('Save…')
+        self._rec_csv_btn  = QPushButton('Export CSV…')
+        for b, fn in ((self._rec_load_btn, self._on_load_recording),
+                      (self._rec_save_btn, self._on_save_recording),
+                      (self._rec_csv_btn,  self._on_export_csv)):
+            b.setStyleSheet(self._rec_btn_qss(False, self.CYAN))
+            b.clicked.connect(lambda _c=False, f=fn: f())
+            row_l.addWidget(b)
+        self._rec_save_btn.setEnabled(False)
+        self._rec_csv_btn.setEnabled(False)
+        row_l.addStretch()
+        self._rec_status = QLabel('')
+        self._rec_status.setFont(QFont(_FONT_SANS, 10, QFont.Weight.Bold))
+        self._rec_status.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+        row_l.addWidget(self._rec_status)
+        ctl_v.addWidget(row)
+        self._rec_hint = _small('')
+        ctl_v.addWidget(self._rec_hint)
+        layout.addWidget(ctl)
+
+        # ── Analysis ──────────────────────────────────────────────────
+        ana = QFrame(); ana.setObjectName('card')
+        ana_v = QVBoxLayout(ana); ana_v.setContentsMargins(14, 10, 14, 12); ana_v.setSpacing(6)
+        srow = QWidget(); srow.setStyleSheet('background: transparent;')
+        srow_l = QHBoxLayout(srow); srow_l.setContentsMargins(0, 0, 0, 0); srow_l.setSpacing(8)
+        srow_l.addWidget(_small('Stream', self.FG))
+        self._rec_stream_combo = QComboBox()
+        self._rec_stream_combo.setStyleSheet(self._combo_qss())
+        self._rec_stream_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._rec_stream_combo.currentIndexChanged.connect(lambda _i: self._render_rec_report())
+        srow_l.addWidget(self._rec_stream_combo, stretch=1)
+        self._rec_gaps_chk = QCheckBox('Gaps only')
+        self._rec_gaps_chk.setStyleSheet(f"""
+            QCheckBox {{ color: {self.FG}; background: transparent; font-family: {_FONT_SANS};
+                         font-size: 12px; spacing: 6px; }}
+            QCheckBox::indicator {{ width: 14px; height: 14px; border: 1px solid {self.DIM};
+                                    border-radius: 3px; background: {self.BG}; }}
+            QCheckBox::indicator:checked {{ background: {self.CYAN}; border-color: {self.CYAN}; }}
+        """)
+        self._rec_gaps_chk.setToolTip('Show only fields that are Zero or Not sent')
+        self._rec_gaps_chk.toggled.connect(lambda _c: self._render_rec_report())
+        srow_l.addWidget(self._rec_gaps_chk)
+        ana_v.addWidget(srow)
+
+        self._rec_summary = QLabel('')
+        self._rec_summary.setFont(QFont(_FONT_MONO, 9))
+        self._rec_summary.setWordWrap(True)
+        self._rec_summary.setStyleSheet(f'color: {self.FG}; background: transparent;')
+        ana_v.addWidget(self._rec_summary)
+        self._rec_counts = QLabel('')
+        self._rec_counts.setFont(QFont(_FONT_SANS, 10, QFont.Weight.Bold))
+        self._rec_counts.setStyleSheet('background: transparent;')
+        ana_v.addWidget(self._rec_counts)
+
+        tbl = QTableWidget(0, 4)
+        tbl.setHorizontalHeaderLabels(['Field', 'Status', 'Value / range', 'Distinct'])
+        hh = tbl.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        hh.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        tbl.setColumnWidth(0, 300); tbl.setColumnWidth(1, 80); tbl.setColumnWidth(3, 70)
+        tbl.verticalHeader().setVisible(False)
+        tbl.verticalHeader().setDefaultSectionSize(22)
+        tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        tbl.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self._rec_table = tbl
+        self._rec_font = QFont(_FONT_MONO, 9)
+        ana_v.addWidget(tbl, stretch=1)
+        layout.addWidget(ana, stretch=1)
+
+        self._rec_ports_shown = None
+        self._set_rec_status('No recording yet', self.DIM)
+        self._rec_summary.setText('Choose a length and press Record, or load a saved recording.')
+
+    def _set_rec_status(self, text: str, color: str):
+        self._rec_status.setText(text)
+        self._rec_status.setStyleSheet(f'color: {color}; background: transparent;')
+
+    def _on_record_clicked(self):
+        now = time.perf_counter()
+        if self.recorder.active:
+            self.recorder.stop()
+            self._finish_recording(self.recorder.elapsed(now))
+            return
+        if not self.listeners:
+            self._set_rec_status('Not listening on any port — check Settings › Network', self.RED)
+            return
+        secs = self._rec_len_combo.currentData() or 20
+        self.recorder.start(secs, now, ports=list(self.listeners))
+        self._rec_btn.setText('■ Stop')
+        self._rec_btn.setStyleSheet(self._rec_btn_qss(False, self.RED))
+        for w in (self._rec_len_combo, self._rec_load_btn, self._rec_save_btn, self._rec_csv_btn):
+            w.setEnabled(False)
+
+    def _finish_recording(self, seconds: float):
+        rec = self.recorder.recording(actual_duration=seconds)
+        rec.meta['app'] = f'FreeD Dashboard {__version__}'
+        self._rec_btn.setText('● Record')
+        self._rec_btn.setStyleSheet(self._rec_btn_qss(True, self.RED))
+        self._rec_len_combo.setEnabled(True)
+        self._rec_load_btn.setEnabled(True)
+        started = self.recorder.started_at.strftime('%H:%M:%S') if self.recorder.started_at else ''
+        self._set_recording(rec, f'Recorded {started} · {seconds:.1f} s · not saved', unsaved=True)
+
+    def _update_recorder_ui(self):
+        ports = self._ports_str()
+        if ports != self._rec_ports_shown:
+            self._rec_ports_shown = ports
+            self._rec_hint.setText(f'Records every packet arriving on the listening ports ({ports}), '
+                                   f'including other senders. The live view keeps running.')
+        if self.recorder.active or self._rec_btn.text().startswith('■'):
+            now = time.perf_counter()
+            if self.recorder.poll(now):
+                self._set_rec_status(
+                    f'● Recording  {self.recorder.elapsed(now):4.1f} / {self.recorder.duration:.0f} s'
+                    f'  ·  {self.recorder.count:,} packets', self.RED)
+            else:
+                self._finish_recording(self.recorder.duration)
+
+    def _set_recording(self, rec: Recording, status: str, unsaved: bool):
+        self._recording = rec
+        self._rec_unsaved = unsaved
+        self._rec_reports = analyze(rec)
+        self._rec_stream_combo.blockSignals(True)
+        self._rec_stream_combo.clear()
+        for r in self._rec_reports:
+            self._rec_stream_combo.addItem(f"{r['proto_name']}  ·  {r['label']}  ·  {r['src']} → :{r['port']}")
+        self._rec_stream_combo.blockSignals(False)
+        self._rec_save_btn.setEnabled(bool(rec.datagrams))
+        self._rec_csv_btn.setEnabled(bool(self._rec_reports))
+        self._set_rec_status(status, self.ORANGE if unsaved else self.GREEN)
+        self._render_rec_report()
+
+    def _current_rec_report(self):
+        i = self._rec_stream_combo.currentIndex()
+        return self._rec_reports[i] if 0 <= i < len(self._rec_reports) else None
+
+    def _render_rec_report(self):
+        rep = self._current_rec_report()
+        tbl = self._rec_table
+        if rep is None:
+            tbl.setRowCount(0)
+            self._rec_counts.setText('')
+            if self._recording is not None:
+                self._rec_summary.setText(
+                    f"Nothing arrived on ports {', '.join(str(p) for p in self._recording.meta.get('ports', []))} "
+                    f'during the recording. Check that the sender is streaming to this PC.')
+            return
+        iv = rep['interval']
+        parts = [f"{rep['samples']:,} samples", f"{rep['datagrams']:,} packets"]
+        if rep['rate']:
+            parts.append(f"{rep['rate']:.2f}/s")
+        if iv:
+            parts.append(f"interval {iv['mean_ms']:.2f} ± {iv['std_ms']:.2f} ms "
+                         f"(min {iv['min_ms']:.1f}, max {iv['max_ms']:.1f})")
+        parts += [f'{k.lower()} {v}' for k, v in rep['errors'].items()]
+        parts += rep['info']
+        self._rec_summary.setText('  ·  '.join(str(p) for p in parts))
+
+        colors = {STATUS_LIVE: self.GREEN, STATUS_FIXED: self.FG,
+                  STATUS_ZERO: self.ORANGE, STATUS_MISSING: self.RED}
+        self._rec_counts.setText('   '.join(
+            f'<span style="color:{colors[s]}">{STATUS_NAMES[s]} {rep["counts"][s]}</span>'
+            for s in (STATUS_LIVE, STATUS_FIXED, STATUS_ZERO, STATUS_MISSING)))
+
+        gaps = self._rec_gaps_chk.isChecked()
+        fields = [f for f in rep['fields'] if not gaps or f['status'] in (STATUS_ZERO, STATUS_MISSING)]
+        tbl.setRowCount(len(fields))
+        for r, f in enumerate(fields):
+            for c, text in enumerate([f['path'], STATUS_NAMES[f['status']], f['summary'], str(f['distinct'])]):
+                item = tbl.item(r, c)
+                if item is None:
+                    item = QTableWidgetItem()
+                    item.setFont(self._rec_font)
+                    tbl.setItem(r, c, item)
+                item.setText(text)
+                item.setToolTip(text)
+                item.setForeground(QColor(colors[f['status']] if c == 1 else
+                                          (self.DIM if c == 3 else self.FG)))
+
+    def _on_save_recording(self, path: str = None):
+        if self._recording is None:
+            return
+        if path is None:
+            os.makedirs(self.REC_DIR, exist_ok=True)
+            stamp = self.recorder.started_at or datetime.now()
+            default = os.path.join(self.REC_DIR, f"FreeD_{stamp.strftime('%Y%m%d_%H%M%S')}{REC_EXT}")
+            path, _ = QFileDialog.getSaveFileName(self, 'Save recording', default,
+                                                  f'FreeD recordings (*{REC_EXT})')
+            if not path:
+                return
+        try:
+            self._recording.save(path)
+        except OSError as e:
+            self._set_rec_status(f'Could not save: {e}', self.RED)
+            return
+        self._rec_unsaved = False
+        self._set_rec_status(f'Saved  {os.path.basename(path)}', self.GREEN)
+
+    def _on_load_recording(self, path: str = None):
+        if path is None:
+            start = self.REC_DIR if os.path.isdir(self.REC_DIR) else os.path.expanduser('~')
+            path, _ = QFileDialog.getOpenFileName(self, 'Load recording', start,
+                                                  f'FreeD recordings (*{REC_EXT});;All files (*)')
+            if not path:
+                return
+        try:
+            rec = Recording.load(path)
+        except (OSError, ValueError) as e:
+            self._set_rec_status(f'Could not load: {e}', self.RED)
+            return
+        when = rec.meta.get('created') or ''
+        self._set_recording(rec, f'Loaded  {os.path.basename(path)}  ·  {when.replace("T", " ")}'
+                                 f'  ·  {rec.duration:.1f} s', unsaved=False)
+
+    def _on_export_csv(self, path: str = None):
+        rep = self._current_rec_report()
+        if rep is None:
+            return
+        if path is None:
+            os.makedirs(self.REC_DIR, exist_ok=True)
+            name = f"FreeD_{rep['proto_name']}_{rep['src'].replace(':', '-')}.csv"
+            path, _ = QFileDialog.getSaveFileName(self, 'Export analysis', os.path.join(self.REC_DIR, name),
+                                                  'CSV (*.csv)')
+            if not path:
+                return
+        try:
+            with open(path, 'w', newline='', encoding='utf-8') as fh:
+                csv.writer(fh).writerows(report_csv_rows(rep))
+        except OSError as e:
+            self._set_rec_status(f'Could not export: {e}', self.RED)
+            return
+        self._set_rec_status(f'Exported  {os.path.basename(path)}', self.GREEN)
 
     # ------------------------------------------------------------------
     # Update loop (10 Hz via QTimer)
@@ -2103,8 +2445,10 @@ class FreeDDashboard(QMainWindow):
         self._update_fwd_ui()
         self._tick = getattr(self, '_tick', 0) + 1
         try:
-            if self._tabs.currentIndex() == self._oti_tab_index:
-                self._update_oti_tab(full=(self._tick % 5 == 0))
+            self._update_recorder_ui()
+            if (self._tabs.currentIndex() == self._pmap_tab_index
+                    and self._pmap_sub.currentIndex() == self._oti_sub_index):
+                self._update_oti_tab()
             if self._tick % 5 == 0:
                 self._update_network_ui()
         except Exception as e:
@@ -2176,9 +2520,15 @@ class FreeDDashboard(QMainWindow):
         self.lbl_z.setText(f'{z_m:+7.3f} m  [{data["position"]["z"]}]')
         self.lbl_z.setStyleSheet(f'color: {pos_color}; background: transparent;')
 
-        # Lens
-        focal_length   = data['zoom']  / 1000.0 if data['zoom'] != 0 else None
-        focus_distance = abs(data['focus'] / 1000.0) if data['focus'] not in (0, 65535) else None
+        # Lens — OpenTrackIO carries physical values; the converted FreeD zoom/focus
+        # fields hold raw encoder counts, so they are shown as [raw] only.
+        oti_lens = (data.get('oti') or {}).get('lens')
+        if oti_lens is not None:
+            focal_length   = oti_lens.get('pinholeFocalLength')
+            focus_distance = oti_lens.get('focusDistance')
+        else:
+            focal_length   = data['zoom']  / 1000.0 if data['zoom'] != 0 else None
+            focus_distance = abs(data['focus'] / 1000.0) if data['focus'] not in (0, 65535) else None
         total_inches   = focus_distance * 39.3701 if focus_distance is not None else 0.0
         feet           = int(total_inches // 12)
         frac_in        = total_inches % 12
@@ -2311,7 +2661,7 @@ class FreeDDashboard(QMainWindow):
                  f'{lock_str}  ph={gl_phase_pm:X}h  ref=0x{rb[27]:02X}'),
                 (f'{rb[28]:02X}',
                  'Checksum', f'0x{rb[28]:02X}',
-                 'OK' if data['checksum_valid'] else 'MISMATCH'),
+                 f"OK ({data.get('checksum_scheme')})" if data['checksum_valid'] else 'MISMATCH'),
             ]
             mono = self._pm_font
             for i, (hx, field, raw_val, decoded) in enumerate(map_rows):

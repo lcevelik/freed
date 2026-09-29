@@ -1,5 +1,5 @@
 """
-OpenTrackIO sender — converts FreeD data to OpenTrackIO v1.0.1 JSON over UDP.
+OpenTrackIO — sender (FreeD → JSON over UDP) and receiver (JSON / CBOR parser).
 Spec: SMPTE RIS-OSVP / opentrackio.org
 """
 
@@ -10,6 +10,15 @@ import threading
 import time
 import uuid
 from datetime import datetime
+
+try:
+    import cbor2          # CBOR-encoded OpenTrackIO input
+except ImportError:       # pragma: no cover - only when the dependency is missing
+    cbor2 = None
+
+from .protocol import freed_checksum
+
+CBOR_MISSING_ERROR = 'CBOR stream received but the cbor2 module is not installed (pip install cbor2)'
 
 
 class OpenTrackIOSender:
@@ -305,7 +314,8 @@ class OpenTrackIOParser:
             if encoding == OTI_ENC_JSON:
                 obj = json.loads(body.decode('utf-8'))
             elif encoding == OTI_ENC_CBOR:
-                import cbor2   # optional dependency
+                if cbor2 is None:
+                    raise RuntimeError(CBOR_MISSING_ERROR)
                 obj = cbor2.loads(body)
             else:
                 raise ValueError(f'unknown encoding 0x{encoding:02X}')
@@ -375,11 +385,12 @@ def oti_to_freed_packet(sample: dict, camera_id: int = None) -> bytes:
     """
     Convert an OpenTrackIO sample to a plain 29-byte FreeD D1 packet (no timecode).
 
-    Units follow this app's existing FreeD conventions:
+    Matches what a Sony Ocellus sends in its own FreeD output:
       pan/tilt/roll  degrees × 32768
       x/y/z          metres × 64000   (1/64 mm)
-      zoom           focal length mm × 1000   (lens.pinholeFocalLength)
-      focus          focus distance m × 1000  (lens.focusDistance)
+      zoom / focus   raw lens encoder counts (lens.rawEncoders, 0-65535); if the
+                     sample has none, the normalised lens.encoders × 65535
+      byte 28        standard FreeD checksum (0x40 - sum of bytes 0-27)
     Byte 26 upper nibble carries a genlock phase counter that cycles while
     timing.synchronization.locked is true (constant 0 when unlocked), so
     FreeD lock detection matches the OpenTrackIO sync state.
@@ -407,10 +418,19 @@ def oti_to_freed_packet(sample: dict, camera_id: int = None) -> bytes:
     pkt[11:14] = _s24(float(pos.get('x', 0.0)) * 64000.0)
     pkt[14:17] = _s24(float(pos.get('y', 0.0)) * 64000.0)
     pkt[17:20] = _s24(float(pos.get('z', 0.0)) * 64000.0)
-    pkt[20:23] = _s24(float(lens.get('pinholeFocalLength') or 0.0) * 1000.0)
-    pkt[23:26] = _s24(float(lens.get('focusDistance') or 0.0) * 1000.0)
+    pkt[20:23] = _s24(_lens_encoder(lens, 'zoom'))
+    pkt[23:26] = _s24(_lens_encoder(lens, 'focus'))
     if sync.get('locked'):
         seq = timing.get('sequenceNumber', (sample.get('_meta') or {}).get('seq', 0))
         pkt[26] = (int(seq) & 0xF) << 4
-    pkt[28] = (0xF6 - pkt[26] - pkt[27]) & 0xFF
+    pkt[28] = freed_checksum(pkt)
     return bytes(pkt)
+
+
+def _lens_encoder(lens: dict, axis: str) -> float:
+    """Raw encoder count for 'zoom' / 'focus', falling back to normalised × 65535."""
+    raw = (lens.get('rawEncoders') or {}).get(axis)
+    if raw is not None:
+        return float(raw)
+    norm = (lens.get('encoders') or {}).get(axis)
+    return float(norm) * 65535.0 if norm is not None else 0.0

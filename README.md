@@ -2,7 +2,7 @@
 
 A PyQt6 dark-theme GUI application for receiving, parsing, and analysing camera tracking data from the **FreeD (D1)** and **OpenTrackIO** protocols over UDP.
 
-![Version](https://img.shields.io/badge/version-v2.0.0-orange) ![Python](https://img.shields.io/badge/Python-3.8%2B-blue) ![PyQt6](https://img.shields.io/badge/PyQt6-6.x-green) ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
+![Version](https://img.shields.io/badge/version-v3.0.0-orange) ![Python](https://img.shields.io/badge/Python-3.8%2B-blue) ![PyQt6](https://img.shields.io/badge/PyQt6-6.x-green) ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
 
 ---
 
@@ -12,13 +12,15 @@ A PyQt6 dark-theme GUI application for receiving, parsing, and analysing camera 
 - **OpenTrackIO input** (e.g. Sony Ocellus) — segmented messages reassembled, checksum-verified, lens / distortion / timing / device metadata decoded
 - Input mode: **FreeD**, **OpenTrackIO**, **Both** (separate ports) or **Auto-detect** — every datagram is identified from its header
 - Detected-senders table with optional lock to one sender IP; wrong-protocol-on-port warning with one-click switch
+- **OpenTrackIO JSON and CBOR** input (CBOR via the `cbor2` package, bundled in the EXE)
+- **Recorder & analyzer** — record 10–60 s of everything arriving on the listening ports, see which fields each stream actually carries (Live / Fixed / Zero / Not sent), save and reload recordings, export the analysis as CSV
 - Apple-dark PyQt6 GUI with five tabs:
   - **Dashboard** — live rotation, position, lens, genlock, timecode, and status (follows the active source)
-  - **Packet Map** — byte-by-byte protocol breakdown with decoded values
   - **Jitter** — timing health banner, numeric noise monitoring, genlock health, and full reference guide
-  - **OpenTrackIO** — device, transform, lens, distortion, timing, stream statistics and raw JSON
+  - **Packet Map** — sub-tabs **FreeD** (byte-by-byte breakdown with decoded values) and **OpenTrackIO** (device, transform, lens, distortion, timing, stream statistics)
+  - **Recorder** — record, analyse, save / load recordings
   - **Settings** — configure input, destinations, frame rate, timecode source, and OpenTrackIO output
-- Correct checksum validation — device-verified formula `(byte26 + byte27 + byte28) & 0xFF == 0xF6`
+- Checksum validation — standard FreeD `(0x40 - sum of bytes 0–27) & 0xFF` (Sony Ocellus, Unreal) and the legacy `(byte26 + byte27 + byte28) & 0xFF == 0xF6` are both accepted; packets the app writes use the standard checksum
 - Parses 29-byte FreeD D1 packets with unit conversion (degrees, meters, mm)
 - Timecode from system clock (H:M:S:F) displayed live in the Timing tab and Settings
 - Genlock phase detection, lock status, and genlock-aware jitter health assessment
@@ -40,14 +42,15 @@ A PyQt6 dark-theme GUI application for receiving, parsing, and analysing camera 
 | Python  | 3.8+    |
 | PyQt6   | 6.x     |
 | numpy   | 1.x / 2.x |
+| cbor2   | 5.x+ (only for CBOR OpenTrackIO input) |
 
 ```bash
-pip install PyQt6 numpy
+pip install PyQt6 numpy cbor2
 ```
 
 ### Running the portable executable
 
-No dependencies — copy `dist\FreeD_Reader_V2.0.0.exe` to any Windows machine and run it.
+No dependencies — copy `dist\FreeD_Reader_V3.0.0.exe` to any Windows machine and run it.
 
 ---
 
@@ -128,6 +131,22 @@ Health LED thresholds:
 
 Scrollable in-app documentation covering what each metric means, common causes of poor jitter, and how to fix them.
 
+### Recorder
+
+- Pick a length (10 / 20 / 30 / 60 s) and press **Record**; **Stop** ends early. Every packet on the listening ports is captured, including senders the live view filters out. The live view keeps running.
+- When recording ends, each stream (sender + protocol) is analysed: samples, rate, interval mean ± std, checksum errors, lost / incomplete samples, encoding, and every field marked:
+
+| Status | Meaning |
+|--------|---------|
+| Live | more than one value seen — the range is shown |
+| Fixed | one meaningful value |
+| Zero | field present but always 0 / "N/A" / empty |
+| Not sent | an OpenTrackIO reference field never present |
+
+- **Gaps only** shows just the Zero and Not sent fields.
+- **Save…** writes a `.fdrec` file (default folder `Documents\FreeD Recordings`); **Load…** reopens one for analysis; **Export CSV…** writes the field table of the selected stream.
+- `.fdrec` files are JSON Lines holding the raw datagrams with timestamps, so a recording can be re-analysed later with newer versions of the app. A 20 s Ocellus recording is about 1 MB.
+
 ### Settings
 
 - **Network** — choose the input mode and ports; hit **Apply ports** to rebind without restarting. The *Detected senders* table lists everything arriving (protocol, device, rate, status); *accept from* locks a protocol to one sender IP
@@ -151,7 +170,7 @@ The active source drives the Dashboard, Packet Map, Jitter tab and all outputs:
 | FreeD | FreeD packets (+ TC injection if enabled) | generated from FreeD |
 | OpenTrackIO | converted to 29-byte FreeD D1, **no timecode** | original packets relayed unchanged |
 
-OTI → FreeD conversion uses the same units as FreeD input: zoom = `pinholeFocalLength` mm × 1000, focus = `focusDistance` m × 1000.
+OTI → FreeD conversion matches the Sony Ocellus's own FreeD output: zoom / focus = raw lens encoder counts (`lens.rawEncoders`, 0–65535), standard FreeD checksum. The Dashboard shows the physical focal length and focus distance from OpenTrackIO.
 Genlock lock state is carried in the byte-26 phase counter. The relay pauses automatically if the output would loop back into this app's own OpenTrackIO port.
 
 All settings are saved automatically to `%APPDATA%\FreeDReader\freed_forwarder_config.json` and restored on next launch.
@@ -175,9 +194,11 @@ All settings are saved automatically to `%APPDATA%\FreeDReader\freed_forwarder_c
 | 20–22 | Zoom | ÷ 1000 | mm focal length |
 | 23–25 | Focus | ÷ 1000 | meters |
 | 26–27 | Spare / Genlock | upper nibble = phase | timecode / genlock |
-| 28 | Checksum | `(byte26 + byte27 + byte28) & 0xFF == 0xF6` | — |
+| 28 | Checksum | `(0x40 - sum of bytes 0–27) & 0xFF` | — |
 
-> **Checksum note:** The device uses a spare-byte complement scheme, not a standard XOR. The formula was determined by live packet capture and verified across 200+ packets.
+> **Checksum note:** The standard FreeD checksum is verified on every packet from a Sony Ocellus (722/722 in a live capture). An earlier device used a spare-byte scheme, `(byte26 + byte27 + byte28) & 0xFF == 0xF6`; it is still accepted on input. The Packet Map shows which scheme matched.
+>
+> **Zoom / focus units** are sender-specific. Sony Ocellus sends raw lens encoder counts (0–65535); the `÷ 1000` column reflects the earlier device's mm / m convention.
 
 Optional 4-byte extension (bytes 29–32): full H:M:S:F timecode block, injected by the forwarder when timecode injection is enabled.
 
@@ -192,6 +213,7 @@ freed/
 │   ├── protocol.py              # FreeDParser, FreeDReceiver(GUI), UdpListener, detect_protocol
 │   ├── opentrackio.py           # OpenTrackIOSender + OpenTrackIOParser, OTI → FreeD conversion
 │   ├── forwarder.py             # FreeDForwarder (destinations, TC injection, config)
+│   ├── recorder.py              # Recorder, Recording (.fdrec), analyze()
 │   ├── ltc_reader.py            # BluefishLTCReader
 │   └── ui_utils.py              # Fonts, stdout redirect
 ├── simulators/
@@ -200,11 +222,12 @@ freed/
 ├── tests/
 │   ├── test_freed.py             # FreeD parser / forwarder / OTI output tests
 │   ├── test_opentrackio_input.py # OpenTrackIO input, reassembly, conversion, listener tests
+│   ├── test_recorder.py          # recorder, .fdrec files, field analysis (JSON + CBOR)
 │   └── data/ocellus_sample.json  # captured Ocellus sample (test fixture)
 ├── scripts/                     # launch / build batch files
-├── specs/                       # PyInstaller specs (FreeD_Reader_V2.0.0.spec is current)
+├── specs/                       # PyInstaller specs (FreeD_Reader_V3.0.0.spec is current)
 └── dist/
-    └── FreeD_Reader_V2.0.0.exe  # Standalone executable
+    └── FreeD_Reader_V3.0.0.exe  # Standalone executable
 ```
 
 ---
@@ -212,11 +235,11 @@ freed/
 ## Building the Executable
 
 ```bash
-pip install pyinstaller
-pyinstaller specs/FreeD_Reader_V2.0.0.spec
+pip install pyinstaller cbor2
+pyinstaller specs/FreeD_Reader_V3.0.0.spec
 ```
 
-Output: `dist\FreeD_Reader_V2.0.0.exe` (~50 MB, fully self-contained, no Python required)
+Output: `dist\FreeD_Reader_V3.0.0.exe` (~50 MB, fully self-contained, no Python required)
 
 ---
 
@@ -233,12 +256,15 @@ Output: `dist\FreeD_Reader_V2.0.0.exe` (~50 MB, fully self-contained, no Python 
 - The *Detected senders* table shows every sender reaching the listening ports and why it is (or is not) being used
 
 **Checksum shows MISMATCH**
-- Upgrade to v1.9+ — earlier versions used an incorrect XOR algorithm. v1.9+ uses the correct device-verified formula.
+- Both the standard FreeD checksum and the legacy `0xF6` scheme are accepted; a mismatch under both means the packet is corrupt or uses another vendor scheme
 
 **High jitter (10 ms+)**
 - Windows timer resolution: v1.9 sets 1 ms resolution at startup automatically
 - Readings quantised in ~15.6 ms steps came from `time.monotonic()` (15.6 ms resolution on Windows before Python 3.13); packets are now timestamped with `time.perf_counter()`
 - If jitter persists, it is likely genuine source or network jitter — check the Jitter → Reference tab for diagnosis guidance
+
+**CBOR stream shows decode errors**
+- Install the CBOR decoder: `pip install cbor2` (the v3.0.0 EXE already includes it)
 
 **Settings not saving**
 - Ensure the app has write access to `%APPDATA%\FreeDReader\`
@@ -248,14 +274,17 @@ Output: `dist\FreeD_Reader_V2.0.0.exe` (~50 MB, fully self-contained, no Python 
 
 ## Changelog
 
-### Unreleased
+### v3.0.0 — 2026-09-29
 
 **New features**
 
-- **OpenTrackIO input** — receive OpenTrackIO v1.0.x (JSON; CBOR if `cbor2` is installed) directly from devices such as the Sony Ocellus ASR-CT1. Segmented messages are reassembled, Fletcher-16 verified, and lost / incomplete samples are counted
+- **Recorder tab** — record 10–60 s of raw input from every listening port, analyse each stream field by field (Live / Fixed / Zero / Not sent), save / load `.fdrec` recordings, export the analysis to CSV
+- **CBOR OpenTrackIO** — `cbor2` is now a dependency and bundled in the EXE; a clear error is shown if it is missing
+- **OpenTrackIO input** — receive OpenTrackIO v1.0.x (JSON and CBOR) directly from devices such as the Sony Ocellus ASR-CT1. Segmented messages are reassembled, Fletcher-16 verified, and lost / incomplete samples are counted
 - **Input mode** — FreeD / OpenTrackIO / Both (separate ports) / Auto-detect, with per-datagram protocol detection
 - **Detected senders** table, per-protocol sender lock, and a wrong-protocol warning with one-click switch
-- **OpenTrackIO tab** — device, transform, lens, distortion, timing/genlock, stream statistics, raw JSON
+- **Packet Map › OpenTrackIO** — device, transform, lens, distortion, timing/genlock, stream statistics
+- Tab order is now Dashboard · Jitter · Packet Map · Recorder · Settings; Packet Map has FreeD / OpenTrackIO sub-tabs
 - **OpenTrackIO → FreeD** — converted 29-byte D1 packets (no timecode) go to the existing forwarding destinations; incoming OpenTrackIO is relayed unchanged to the OpenTrackIO output
 - Header badge shows the active source; source picker in Both mode
 
@@ -263,6 +292,8 @@ Output: `dist\FreeD_Reader_V2.0.0.exe` (~50 MB, fully self-contained, no Python 
 
 - **Jitter measurement resolution** — timestamps used `time.monotonic()`, which only ticks every 15.6 ms on Windows with Python < 3.13, adding up to ~8 ms of false jitter. Now `time.perf_counter()` (sub-microsecond)
 - GUI receive buffer raised from 1024 bytes to 64 KB so large datagrams are never truncated
+- **FreeD checksum** — the standard FreeD checksum `(0x40 - sum of bytes 0–27)` is now accepted (Sony Ocellus FreeD showed MISMATCH on every packet); the legacy `0xF6` scheme is still accepted. TC injection, OTI → FreeD conversion and the simulator now **write** the standard checksum, so receivers such as Unreal accept them
+- **OTI → FreeD lens fields** now carry the raw lens encoder counts, matching the Ocellus's own FreeD output (previously mm × 1000)
 
 ### v2.0.0 — 2026-05-12
 

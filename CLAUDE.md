@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 parses, and analyses camera tracking data over UDP — FreeD D1 and OpenTrackIO
 (e.g. Sony Ocellus) input.
 
-Current version: **v2.0.0**  
+Current version: **v3.0.0**  
 Author: Libor Cevelik  
 Platform: Windows  
 Python: 3.8+
@@ -25,14 +25,16 @@ Python: 3.8+
 | `src/protocol.py` | `FreeDParser`, `FreeDReceiver` (CLI loop), `FreeDReceiverGUI` (per-protocol state), `UdpListener` + `detect_protocol` (GUI sockets) |
 | `src/opentrackio.py` | `OpenTrackIOSender` (output + relay), `OpenTrackIOParser` (input reassembly), `oti_to_freed_packet` |
 | `src/forwarder.py` | `FreeDForwarder` — destinations, TC injection, **all config persistence** (incl. input mode/ports) |
+| `src/recorder.py` | `Recorder` (in-memory capture fed by `UdpListener.tap`), `Recording` (`.fdrec` JSON Lines of raw datagrams), `analyze()` (per-stream Live / Fixed / Zero / Not sent field report) |
 | `src/ltc_reader.py` | `BluefishLTCReader` (ctypes wrapper for the Bluefish444 DLL) |
 | `src/ui_utils.py` | Platform fonts, `configure_stdout()` (devnull redirect for `--noconsole`) |
 | `simulators/freed_simulator.py` | Sends synthetic 29-byte FreeD D1 UDP packets for testing |
 | `simulators/opentrackio_simulator.py` | Sends synthetic OpenTrackIO JSON UDP packets for pipeline testing |
 | `tests/test_freed.py` | FreeD parser / forwarder / OTI output tests |
 | `tests/test_opentrackio_input.py` | OTI input: header, reassembly, conversion, `UdpListener` over loopback |
+| `tests/test_recorder.py` | Recorder timing, `.fdrec` round trip, analyzer classification (JSON + CBOR) |
 | `tests/data/ocellus_sample.json` | Real captured Ocellus sample used as a fixture |
-| `specs/FreeD_Reader_V2.0.0.spec` | Current PyInstaller build spec (older specs in `specs/` are historical) |
+| `specs/FreeD_Reader_V3.0.0.spec` | Current PyInstaller build spec — lists `cbor2` in `hiddenimports` (older specs in `specs/` are historical) |
 
 ---
 
@@ -54,7 +56,7 @@ UdpListener per port (src/protocol.py) — recvfrom(65535), perf_counter timesta
                      if active: FreeDForwarder.forward(pkt, inject_tc=False)
 
 QTimer 100 ms → _update() reads _view_state() (receiver or oti_state, per _active_source)
-             → Dashboard / Packet Map / Jitter unchanged; OpenTrackIO tab + Network page at 2 Hz
+             → Dashboard / Packet Map / Jitter unchanged; Packet Map › OpenTrackIO (only while visible) + Network page at 2 Hz
 ```
 
 Input modes (`FreeDForwarder.INPUT_MODES`): `freed`, `oti`, `both` (active source picked in the
@@ -79,18 +81,26 @@ internally so the existing Dashboard/Jitter code works on it unchanged.
 | 20–22 | Zoom | ÷ 1000 | mm |
 | 23–25 | Focus | ÷ 1000 | meters |
 | 26–27 | Spare / Genlock | upper nibble = phase | timecode / genlock |
-| 28 | Checksum | `(b26 + b27 + b28) & 0xFF == 0xF6` | — |
+| 28 | Checksum | `(0x40 - sum(bytes 0–27)) & 0xFF` | — |
 
-**Checksum formula (device-verified):** `(byte26 + byte27 + byte28) & 0xFF == 0xF6`
-This is NOT a standard XOR. Determined by live capture across 200+ packets.
+**Checksum:** input accepts either scheme — **standard** `(0x40 - sum(bytes 0–27)) & 0xFF`
+(Sony Ocellus, verified on 722/722 live packets; what Unreal and most receivers expect) or
+**legacy** `(b26 + b27 + b28) & 0xFF == 0xF6` (an earlier device). Parsed dicts carry
+`checksum_scheme` = `'standard'` / `'legacy'` / `None`. **Everything the app writes uses the
+standard checksum** via `src.protocol.freed_checksum()`.
 
-Zoom/focus `÷ 1000` is the simple display path. The dashboard's OTI output and the
+Zoom/focus units depend on the sender. Sony Ocellus FreeD puts **raw lens encoder counts**
+(0–65535, identical to OpenTrackIO `lens.rawEncoders`) in bytes 20–25, and
+`oti_to_freed_packet()` does the same. The `÷ 1000` (mm / m) reading is the older device's
+convention and is the Dashboard's display path for FreeD input; for OpenTrackIO input the
+Dashboard shows the physical `pinholeFocalLength` / `focusDistance` instead. The dashboard's OTI output and the
 CLI instead use piecewise-linear interpolation over `zoom_calibration` / `focus_calibration`
 in `FreeDReceiver` (`src/protocol.py`). Those tables are hardcoded for a Fujinon Premista 28–100
 and clamp values outside their range.
 
-The checksum formula lives in three places: `FreeDParser.calculate_checksum`, `FreeDForwarder`
-TC injection, and `freed_simulator.build_freed_packet`. Keep all three in sync.
+Checksum writers: `FreeDForwarder._inject_tc` and `oti_to_freed_packet` call `freed_checksum()`;
+`simulators/freed_simulator.build_freed_packet` and its copy in `tests/test_freed.py` inline the
+same standard formula. Keep them in sync.
 
 Optional 4-byte extension (bytes 29–32): H, M, S, F timecode block injected by the forwarder.
 
@@ -138,9 +148,9 @@ Stored in `%APPDATA%\FreeDReader\freed_forwarder_config.json`:
 | Tab | Sub-tabs | Content |
 |-----|----------|---------|
 | Dashboard | — | Rotation, Position, Lens, Genlock, Status (timecode + packets), Raw Packet |
-| Packet Map | — | Byte-by-byte table: hex / field / raw / decoded |
 | Jitter | Monitor, Reference | Timing stats, Position noise (X/Y/Z), Rotation noise (Pan/Tilt/Roll), genlock-aware health banner |
-| OpenTrackIO | — | Device, transform, lens, distortion, timing, stream stats, raw JSON of the last OTI sample |
+| Packet Map | FreeD, OpenTrackIO | FreeD: byte-by-byte table (hex / field / raw / decoded). OpenTrackIO: six cards — device, transform, lens, distortion, timing, stream |
+| Recorder | — | Record 10–60 s of raw input (all listening ports), per-stream field analysis, Save / Load `.fdrec` (default `Documents\FreeD Recordings`), Export CSV |
 | Settings | Network, Output, Timecode | Input mode/ports, sender lock, detected senders; forwarding destinations, OpenTrackIO; TC source/FPS/connector |
 
 ---
@@ -173,9 +183,9 @@ python simulators/opentrackio_simulator.py  # GUI that sends synthetic OpenTrack
 ## Build
 
 ```bash
-pip install PyQt6 numpy pyinstaller
-pyinstaller specs/FreeD_Reader_V2.0.0.spec      # or scripts\BUILD_EXECUTABLE.bat
-# Output: dist\FreeD_Reader_V2.0.0.exe
+pip install PyQt6 numpy cbor2 pyinstaller
+pyinstaller specs/FreeD_Reader_V3.0.0.spec      # or scripts\BUILD_EXECUTABLE.bat
+# Output: dist\FreeD_Reader_V3.0.0.exe
 ```
 
 A version bump means updating `__version__` in `freed_reader.py`, creating a new spec in `specs/`,
@@ -218,6 +228,8 @@ change the packet layout in the simulator, update those copies too. There is no 
 - `recvfrom` timestamp must be captured **before** any parsing — jitter is measured at socket level
 - Use `time.perf_counter()` for packet timestamps, never `time.monotonic()` — on Windows with Python < 3.13 monotonic ticks every 15.6 ms and fakes ~8 ms of jitter. All receive-path timestamps must use the same clock
 - OpenTrackIO senders segment large messages (Ocellus: 1216 + ~285 byte datagrams per sample) — never read with a small `recvfrom` buffer
+- `cbor2` is imported at module load in `src/opentrackio.py` (optional: `None` if missing → decode error with an install hint). Keep it in the spec's `hiddenimports`
+- The recorder taps datagrams **before** protocol / sender filtering, so recordings include wrong-port and filtered senders; `analyze()` re-parses raw bytes with fresh parser instances and never touches live state
 - OTI → FreeD packets are sent **without** TC (`forward(..., inject_tc=False)`); TC injection is for FreeD input only
 - The OTI relay is suppressed (`_relay_blocked`) when the OTI output points at this machine's own OTI listen port
 - Bluefish DLL path is hardcoded to `C:\Program Files\Bluefish444\...` — `available=False` if missing, all code falls back to system clock silently

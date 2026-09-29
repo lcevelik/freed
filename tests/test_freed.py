@@ -61,8 +61,8 @@ def build_freed_packet(
         pkt[26] = 0x00
     pkt[27] = 0x00
 
-    # Device checksum: (byte26 + byte27 + byte28) & 0xFF == 0xF6
-    pkt[28] = (0xF6 - pkt[26] - pkt[27]) & 0xFF
+    # Standard FreeD checksum: (0x40 - sum of bytes 0-27) & 0xFF
+    pkt[28] = (0x40 - sum(pkt[:28])) & 0xFF
 
     return bytes(pkt)
 
@@ -98,30 +98,47 @@ class TestFreeDParser(unittest.TestCase):
         self.assertEqual(self.parser.parse_24bit_int(data), 0)
 
     def test_calculate_checksum_known_value(self):
-        # calculate_checksum returns (0xF6 - byte26 - byte27) & 0xFF
-        # For a 29-byte packet with byte26=0x00, byte27=0x00: expected = 0xF6
+        # Standard FreeD: (0x40 - sum of bytes 0-27) & 0xFF
+        # Only byte0 = 0xD1 set: (0x40 - 0xD1) & 0xFF = 0x6F
         pkt = bytearray(29)
         pkt[0] = 0xD1
-        self.assertEqual(self.parser.calculate_checksum(bytes(pkt)), 0xF6)
+        self.assertEqual(self.parser.calculate_checksum(bytes(pkt)), 0x6F)
 
     def test_calculate_checksum_known_value2(self):
-        # byte26=0x31, byte27=0x20 → expected = (0xF6 - 0x31 - 0x20) & 0xFF = 0xA5
+        # byte26=0x31, byte27=0x20 → (0x40 - 0xD1 - 0x31 - 0x20) & 0xFF = 0x1E
         pkt = bytearray(29)
         pkt[0] = 0xD1
         pkt[26] = 0x31
         pkt[27] = 0x20
-        self.assertEqual(self.parser.calculate_checksum(bytes(pkt)), 0xA5)
+        self.assertEqual(self.parser.calculate_checksum(bytes(pkt)), 0x1E)
 
     def test_verify_checksum_valid(self):
         pkt = bytearray(29)
         pkt[0] = 0xD1
+        pkt[26] = 0x31; pkt[27] = 0x20; pkt[28] = 0x1E
+        self.assertTrue(self.parser.verify_checksum(bytes(pkt)))
+        self.assertEqual(self.parser.checksum_scheme(bytes(pkt)), 'standard')
+
+    def test_verify_checksum_legacy_still_accepted(self):
+        # Legacy scheme: (byte26 + byte27 + byte28) & 0xFF == 0xF6
+        pkt = bytearray(29)
+        pkt[0] = 0xD1
         pkt[26] = 0x31; pkt[27] = 0x20; pkt[28] = 0xA5
         self.assertTrue(self.parser.verify_checksum(bytes(pkt)))
+        self.assertEqual(self.parser.checksum_scheme(bytes(pkt)), 'legacy')
+
+    def test_verify_checksum_ocellus_packets(self):
+        # Real packets captured from a Sony Ocellus ASR-CT1 FreeD output
+        for hx in ('d101ff302401a73100146d00f867fea49d014ad500676c00fbe0c00095',
+                   'd101ffa2f1ff41980016fe00f8acfea96e014c240023d60054ccc4b138'):
+            result = self.parser.parse(bytes.fromhex(hx))
+            self.assertTrue(result['checksum_valid'])
+            self.assertEqual(result['checksum_scheme'], 'standard')
 
     def test_verify_checksum_invalid(self):
         pkt = bytearray(29)
         pkt[0] = 0xD1
-        pkt[26] = 0x31; pkt[27] = 0x20; pkt[28] = 0x00  # wrong
+        pkt[26] = 0x31; pkt[27] = 0x20; pkt[28] = 0x00  # wrong under both schemes
         self.assertFalse(self.parser.verify_checksum(bytes(pkt)))
 
     def _make_valid_packet(self, camera_id=1):
@@ -283,8 +300,8 @@ class TestBuildFreeDPacket(unittest.TestCase):
 
     def test_packet_checksum_valid(self):
         pkt = self._pkt()
-        # Device checksum: (byte26 + byte27 + byte28) & 0xFF == 0xF6
-        self.assertEqual((pkt[26] + pkt[27] + pkt[28]) & 0xFF, 0xF6)
+        # Standard FreeD checksum: (0x40 - sum of bytes 0-27) & 0xFF
+        self.assertEqual((0x40 - sum(pkt[:28])) & 0xFF, pkt[28])
 
     def test_packet_pan_encode_decode(self):
         pan_deg = 12.5
@@ -504,8 +521,8 @@ class TestInjectTCChecksum(unittest.TestCase):
                 genlock_on=False, phase_counter=0,
             )
             result = fwd._inject_tc(bytearray(raw_pkt), ltc_reader=None)
-            # Verify checksum: (byte26 + byte27 + byte28) & 0xFF == 0xF6
-            self.assertEqual((result[26] + result[27] + result[28]) & 0xFF, 0xF6)
+            # TC injection rewrites bytes 26-27 and must restamp the standard checksum
+            self.assertEqual((0x40 - sum(result[:28])) & 0xFF, result[28])
         finally:
             import shutil; shutil.rmtree(tmpdir, ignore_errors=True)
 

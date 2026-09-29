@@ -10,6 +10,8 @@ import threading
 import uuid
 from datetime import datetime
 
+from .protocol import freed_checksum
+
 _APP_DIR = os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), 'FreeDReader')
 os.makedirs(_APP_DIR, exist_ok=True)
 _CONFIG_PATH = os.path.join(_APP_DIR, 'freed_forwarder_config.json')
@@ -87,7 +89,7 @@ class FreeDForwarder:
         wire = ((h & 0x1F) << 11) | ((m & 0x3F) << 5) | ((s >> 1) & 0x1F)
         raw[26] = (wire >> 8) & 0xFF
         raw[27] =  wire       & 0xFF
-        raw[28] = (0xF6 - raw[26] - raw[27]) & 0xFF
+        raw[28] = freed_checksum(raw)
         # Bytes 29-32: extended TC block — full H:M:S:F, one byte each
         raw += bytearray([h & 0xFF, m & 0xFF, s & 0xFF, f & 0xFF])
         return raw
