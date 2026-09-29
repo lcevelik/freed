@@ -5,6 +5,7 @@ FreeD Protocol — parser, UDP receiver, GUI-aware receiver subclass.
 import socket
 import sys
 import struct
+import threading
 import time
 from collections import deque
 from datetime import datetime
@@ -253,7 +254,7 @@ class FreeDReceiver:
             while self.running:
                 try:
                     data, addr = self.socket.recvfrom(1024)
-                    recv_time = time.monotonic()  # timestamp immediately at receive
+                    recv_time = time.perf_counter()  # timestamp immediately at receive
                 except socket.timeout:
                     continue  # no data yet — keep waiting, don't kill the thread
 
@@ -469,7 +470,7 @@ class FreeDReceiverGUI(FreeDReceiver):
         self.on_packet_parsed  = None               # optional callback(data_dict)
 
     def display_data(self, data: dict, addr: tuple, recv_time: float = None):
-        now = recv_time if recv_time is not None else time.monotonic()
+        now = recv_time if recv_time is not None else time.perf_counter()
         if self._last_packet_time is not None:
             interval = (now - self._last_packet_time) * 1000.0
             # Gap >2s means we just reconnected — reset history so fps is clean
@@ -516,3 +517,167 @@ class FreeDReceiverGUI(FreeDReceiver):
                 self.on_packet_parsed(data)
             except Exception:
                 pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Multi-protocol UDP listener
+# ══════════════════════════════════════════════════════════════════════════════
+
+PROTO_FREED = 'freed'
+PROTO_OTI   = 'oti'
+PROTO_NAMES = {PROTO_FREED: 'FreeD', PROTO_OTI: 'OpenTrackIO'}
+
+
+def detect_protocol(data: bytes):
+    """Identify a datagram by its first bytes: 'freed', 'oti', or None."""
+    if len(data) >= 16 and data[0:4] == b'OTrk':
+        return PROTO_OTI
+    if len(data) >= FreeDParser.FREED_PACKET_SIZE and data[0] == FreeDParser.FREED_MESSAGE_TYPE:
+        return PROTO_FREED
+    return None
+
+
+class UdpListener:
+    """
+    One UDP socket + receive thread.
+
+    Every datagram is timestamped at recvfrom, identified by detect_protocol(),
+    recorded in the sender table, and — if its protocol is in `accept` and the
+    sender passes `ip_filter` — handed to handlers[proto](data, addr, recv_time)
+    on the receive thread.  Datagrams of a protocol not accepted on this port
+    are remembered in `mismatch` so the UI can offer to switch.
+    """
+
+    SENDER_EXPIRY = 60.0     # seconds before an idle sender is dropped from the table
+
+    def __init__(self, port: int, accept, handlers: dict, host: str = '0.0.0.0'):
+        self.host      = host
+        self.port      = port
+        self.accept    = set(accept)
+        self.handlers  = handlers
+        self.ip_filter = {}          # proto -> sender IP to lock to ('' / missing = any)
+        self.mismatch  = None        # (proto, addr, recv_time) of last wrong-protocol datagram
+        self.running   = False
+        self.last_error = None
+        self.sock      = None
+        self.thread    = None
+        self._senders  = {}          # addr -> info dict
+        self._lock     = threading.Lock()
+
+    # ── lifecycle ─────────────────────────────────────────────────────────
+
+    def start(self):
+        """Bind and start the receive thread. Raises OSError if the bind fails."""
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        except OSError:
+            pass
+        try:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
+        except OSError:
+            pass
+        s.settimeout(1.0)
+        s.bind((self.host, self.port))
+        self.sock    = s
+        self.running = True
+        self.thread  = threading.Thread(target=self._loop, daemon=True,
+                                        name=f'UdpListener:{self.port}')
+        self.thread.start()
+
+    def stop(self):
+        self.running = False
+        if self.sock is not None:
+            try:
+                self.sock.close()
+            except Exception:
+                pass
+        if self.thread is not None and self.thread.is_alive():
+            self.thread.join(timeout=2.0)
+
+    def is_alive(self) -> bool:
+        return self.thread is not None and self.thread.is_alive()
+
+    # ── receive loop ──────────────────────────────────────────────────────
+
+    def _loop(self):
+        if sys.platform == 'win32':
+            try:
+                import ctypes
+                ctypes.windll.kernel32.SetThreadPriority(
+                    ctypes.windll.kernel32.GetCurrentThread(), 2)  # THREAD_PRIORITY_HIGHEST
+            except Exception:
+                pass
+        while self.running:
+            try:
+                data, addr = self.sock.recvfrom(65535)
+                recv_time = time.perf_counter()      # timestamp immediately at receive
+            except socket.timeout:
+                continue
+            except OSError as e:
+                if not self.running:
+                    break                          # socket closed by stop()
+                if getattr(e, 'winerror', None) == 10054:
+                    continue                       # WSAECONNRESET from a stray ICMP — harmless
+                self.last_error = str(e)
+                break
+
+            proto = detect_protocol(data)
+            self._track(addr, proto, data, recv_time)
+            if proto not in self.accept:
+                if proto is not None:
+                    self.mismatch = (proto, addr, recv_time)
+                continue
+            ip = self.ip_filter.get(proto)
+            if ip and addr[0] != ip:
+                continue
+            handler = self.handlers.get(proto)
+            if handler is None:
+                continue
+            try:
+                handler(data, addr, recv_time)
+            except Exception as e:
+                self.last_error = str(e)
+
+    # ── sender table ──────────────────────────────────────────────────────
+
+    def _track(self, addr, proto, data: bytes, t: float):
+        # An OpenTrackIO message may span several datagrams — count a message
+        # only on its final segment so the rate reads in samples per second.
+        is_msg_end = proto != PROTO_OTI or bool(data[12] & 0x80)
+        with self._lock:
+            info = self._senders.get(addr)
+            if info is None:
+                info = {'addr': addr, 'port': self.port, 'proto': proto,
+                        'datagrams': 0, 'messages': 0, 'first_seen': t,
+                        'last_seen': t, 'last_msg': None, 'interval': None}
+                self._senders[addr] = info
+            info['proto']      = proto
+            info['datagrams'] += 1
+            info['last_seen']  = t
+            if is_msg_end:
+                info['messages'] += 1
+                if info['last_msg'] is not None:
+                    dt = t - info['last_msg']
+                    if dt < 2.0:
+                        prev = info['interval']
+                        info['interval'] = dt if prev is None else prev * 0.9 + dt * 0.1
+                    else:
+                        info['interval'] = None
+                info['last_msg'] = t
+
+    def senders(self, now: float = None) -> list:
+        """Snapshot of the sender table (idle senders are purged)."""
+        now = time.perf_counter() if now is None else now
+        with self._lock:
+            for a in [a for a, i in self._senders.items()
+                      if now - i['last_seen'] > self.SENDER_EXPIRY]:
+                del self._senders[a]
+            out = []
+            for i in self._senders.values():
+                d = dict(i)
+                d['rate'] = (1.0 / i['interval']) if i['interval'] else None
+                d['age']  = now - i['last_seen']
+                out.append(d)
+        return out

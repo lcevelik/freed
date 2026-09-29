@@ -14,6 +14,7 @@ __author__    = 'Libor Cevelik'
 __copyright__ = 'Copyright (c) 2026 Libor Cevelik'
 
 import ctypes
+import json
 import os
 import socket
 import sys
@@ -28,8 +29,10 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QFont, QColor
 import numpy as np
-from src.protocol import FreeDParser, FreeDReceiver, FreeDReceiverGUI
-from src.opentrackio import OpenTrackIOSender
+from src.protocol import (FreeDParser, FreeDReceiver, FreeDReceiverGUI, UdpListener,
+                          PROTO_FREED, PROTO_OTI, PROTO_NAMES)
+from src.opentrackio import (OpenTrackIOSender, OpenTrackIOParser, oti_to_freed_packet,
+                             oti_timecode, oti_device_label, oti_camera_transform)
 from src.ltc_reader import BluefishLTCReader
 from src.forwarder import FreeDForwarder
 
@@ -61,11 +64,19 @@ class FreeDDashboard(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.receiver        = None
-        self.recv_thread     = None
         self._cached_ip_str  = None
         self.forwarder       = FreeDForwarder()
-        self._active_port = self.forwarder.listen_port
+        # Per-protocol state (counters, jitter/noise histories, latest packet).
+        # Sockets live in UdpListener; these objects never open their own.
+        self.receiver        = self._new_state()      # FreeD input
+        self.oti_state       = self._new_state()      # OpenTrackIO input, converted to FreeD form
+        self.oti_parser      = OpenTrackIOParser()
+        self.listeners       = {}                     # port -> UdpListener
+        self._listen_errors  = {}                     # port -> bind error text
+        self._last_rx        = {}                     # proto -> perf_counter time of last datagram
+        self._sender_labels  = {}                     # addr -> device label
+        self._relay_blocked  = False
+        self._active_source  = self._resolve_active_source()
         self.oti_sender   = OpenTrackIOSender()
         # Apply persisted OTI settings (forwarder.load_config() already ran)
         self.oti_sender.enabled      = self.forwarder.oti_enabled
@@ -80,7 +91,8 @@ class FreeDDashboard(QMainWindow):
         if self.forwarder.tc_source == 'auto':
             self.forwarder.tc_source = 'bluefish' if self.ltc_reader.available else 'system'
         self._build_ui()
-        self._start_receiver(self._active_port)
+        self._check_relay_loop()
+        self._start_listeners()
         self.ltc_reader.start()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._do_update)
@@ -188,6 +200,19 @@ class FreeDDashboard(QMainWindow):
         self.lbl_cam.setStyleSheet(f'color: {self.YELLOW}; background: transparent;')
         layout.addWidget(self.lbl_cam)
 
+        self.lbl_src_badge = QLabel('FreeD')
+        self.lbl_src_badge.setFont(QFont(_FONT_SANS, 9, QFont.Weight.Bold))
+        self.lbl_src_badge.setFixedHeight(22)
+        layout.addWidget(self.lbl_src_badge, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        self._hdr_src_combo = QComboBox()
+        self._hdr_src_combo.setStyleSheet(self._combo_qss())
+        self._hdr_src_combo.setToolTip('Source shown on Dashboard / Jitter and sent to the outputs')
+        self._hdr_src_combo.addItem('Show FreeD', PROTO_FREED)
+        self._hdr_src_combo.addItem('Show OpenTrackIO', PROTO_OTI)
+        self._hdr_src_combo.currentIndexChanged.connect(self._on_hdr_source_changed)
+        layout.addWidget(self._hdr_src_combo)
+
         layout.addStretch()
 
         ver = QLabel(f'{__version__}  ·  {__author__}')
@@ -217,6 +242,11 @@ class FreeDDashboard(QMainWindow):
         jitter = QWidget()
         self._build_jitter_tab(jitter)
         tabs.addTab(jitter, '  Jitter  ')
+
+        oti = QWidget()
+        self._build_oti_tab(oti)
+        self._oti_tab_index = tabs.addTab(oti, '  OpenTrackIO  ')
+        self._tabs = tabs
 
         settings = QWidget()
         self._build_settings_tab(settings)
@@ -385,7 +415,7 @@ class FreeDDashboard(QMainWindow):
         st_form.addRow(self._key('Source'),   self.lbl_source)
         st_form.addRow(self._key('Port'),     self.lbl_port)
         st_form.addRow(self._key('Interval'), self.lbl_interval)
-        self.lbl_port.setText(str(self._active_port))
+        self.lbl_port.setText(self._ports_str())
         st_inner.addWidget(st_fw)
         st_vbox.addWidget(st_frame)
         grid.addWidget(st_outer, 2, 0)
@@ -841,61 +871,7 @@ class FreeDDashboard(QMainWindow):
         net_layout.setSpacing(10)
         net_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        net_frame = QFrame()
-        net_frame.setObjectName('card')
-        net_inner = QVBoxLayout(net_frame)
-        net_inner.setContentsMargins(16, 12, 16, 14)
-        net_inner.setSpacing(10)
-
-        row = QWidget()
-        row.setStyleSheet('background: transparent;')
-        row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.setSpacing(10)
-
-        port_lbl = QLabel('UDP Port')
-        port_lbl.setFont(QFont(_FONT_SANS, 11))
-        port_lbl.setStyleSheet(f'color: {self.FG}; background: transparent;')
-        row_layout.addWidget(port_lbl)
-
-        self._settings_port_spin = QSpinBox()
-        self._settings_port_spin.setRange(1024, 65535)
-        self._settings_port_spin.setValue(self._active_port)
-        self._settings_port_spin.setFixedWidth(100)
-        self._settings_port_spin.setStyleSheet(f"""
-            QSpinBox {{
-                background-color: {self.BG}; color: {self.FG};
-                border: 1px solid {self.BORDER}; border-radius: 6px;
-                padding: 4px 8px; font-family: {_FONT_MONO}; font-size: 13px;
-            }}
-            QSpinBox::up-button, QSpinBox::down-button {{
-                width: 18px; background-color: {self.BORDER}; border-radius: 3px;
-            }}
-        """)
-        row_layout.addWidget(self._settings_port_spin)
-
-        apply_btn = QPushButton('Apply')
-        apply_btn.setFixedWidth(80)
-        apply_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {self.CYAN}; color: #000000;
-                border: none; border-radius: 6px; padding: 5px 14px;
-                font-family: {_FONT_SANS}; font-size: 12px; font-weight: bold;
-            }}
-            QPushButton:hover {{ background-color: #5ac8fa; }}
-            QPushButton:pressed {{ background-color: #0a84ff; }}
-        """)
-        apply_btn.clicked.connect(self._on_apply_port)
-        row_layout.addWidget(apply_btn)
-        row_layout.addStretch()
-        net_inner.addWidget(row)
-
-        self._settings_status = QLabel(f'● Listening on port {self._active_port}')
-        self._settings_status.setFont(QFont(_FONT_SANS, 10))
-        self._settings_status.setStyleSheet(f'color: {self.GREEN}; background: transparent;')
-        net_inner.addWidget(self._settings_status)
-
-        net_layout.addWidget(net_frame)
+        self._build_network_page(net_layout)
         sub_tabs.addTab(net_page, 'Network')
 
         # ── Output Destinations sub-tab ───────────────────────────────
@@ -962,6 +938,13 @@ class FreeDDashboard(QMainWindow):
         self._fwd_count_lbl.setStyleSheet(f'color: {self.DIM}; background: transparent;')
         dest_outer.addWidget(self._fwd_count_lbl)
 
+        fwd_note = QLabel('OpenTrackIO input is converted to FreeD D1 for these destinations '
+                          '(29 bytes, no timecode). TC injection applies to FreeD input only.')
+        fwd_note.setWordWrap(True)
+        fwd_note.setFont(QFont(_FONT_SANS, 9))
+        fwd_note.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+        dest_outer.addWidget(fwd_note)
+
         # ── OpenTrackIO section ───────────────────────────────────────
         oti_frame = QFrame()
         oti_frame.setStyleSheet(f'''
@@ -1020,6 +1003,20 @@ class FreeDDashboard(QMainWindow):
         oti_row_l.addWidget(self._oti_port)
         oti_row_l.addStretch()
         oti_outer.addWidget(oti_row_w)
+
+        oti_note = QLabel('FreeD input → generated from FreeD   ·   '
+                          'OpenTrackIO input → relayed unchanged')
+        oti_note.setFont(QFont(_FONT_SANS, 9))
+        oti_note.setStyleSheet(f'color: {self.DIM}; background: transparent; border: none;')
+        oti_outer.addWidget(oti_note)
+
+        self._oti_relay_warn = QLabel('⚠ Relay paused — this output points back at an OpenTrackIO '
+                                      'listen port on this machine (would loop).')
+        self._oti_relay_warn.setWordWrap(True)
+        self._oti_relay_warn.setFont(QFont(_FONT_SANS, 9))
+        self._oti_relay_warn.setStyleSheet(f'color: {self.ORANGE}; background: transparent; border: none;')
+        self._oti_relay_warn.setVisible(False)
+        oti_outer.addWidget(self._oti_relay_warn)
 
 
         dest_layout.addWidget(dest_frame)
@@ -1130,19 +1127,6 @@ class FreeDDashboard(QMainWindow):
 
         tc_layout.addWidget(tc_frame)
         sub_tabs.addTab(tc_page, 'Timecode')
-
-    def _on_apply_port(self):
-        port = self._settings_port_spin.value()
-        if port == self._active_port:
-            return
-        self._settings_status.setText(f'● Restarting on port {port}…')
-        self._settings_status.setStyleSheet(f'color: {self.YELLOW}; background: transparent;')
-        QApplication.processEvents()
-        self._restart_receiver(port)
-        self.forwarder.listen_port = port
-        self.forwarder.save_config()
-        self._settings_status.setText(f'● Listening on port {port}')
-        self._settings_status.setStyleSheet(f'color: {self.GREEN}; background: transparent;')
 
     # ------------------------------------------------------------------
     # Destination row helpers
@@ -1300,6 +1284,7 @@ class FreeDDashboard(QMainWindow):
             self.oti_sender.ip = ip
             self.forwarder.oti_ip = ip
             self.forwarder.save_config()
+            self._check_relay_loop()
 
     def _on_oti_port_changed(self):
         try:
@@ -1308,6 +1293,7 @@ class FreeDDashboard(QMainWindow):
                 self.oti_sender.port = p
                 self.forwarder.oti_port = p
                 self.forwarder.save_config()
+                self._check_relay_loop()
         except ValueError:
             pass
 
@@ -1324,57 +1310,782 @@ class FreeDDashboard(QMainWindow):
         self.oti_sender.send(data, self.ltc_reader, self.forwarder.tc_fps)
 
     # ------------------------------------------------------------------
-    # Receiver (background thread)
+    # Input — listeners, routing, active source (receive threads)
     # ------------------------------------------------------------------
 
-    def _start_receiver(self, port: int = 45000):
-        self.receiver = FreeDReceiverGUI(
-            host='0.0.0.0',
-            port=port,
-            ignore_checksum=True,
-            timecode_fps=24.0,
-            convert_units=True,
-            clear_screen=False,
-            debug=False,
-        )
-        try:
-            self.receiver.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.receiver.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    @staticmethod
+    def _new_state() -> FreeDReceiverGUI:
+        """Counters + jitter/noise histories for one input protocol (no socket)."""
+        return FreeDReceiverGUI(host='0.0.0.0', port=0, ignore_checksum=True,
+                                timecode_fps=24.0, convert_units=True,
+                                clear_screen=False, debug=False)
+
+    def _resolve_active_source(self) -> str:
+        mode = self.forwarder.input_mode
+        if mode == 'freed':
+            return PROTO_FREED
+        if mode == 'oti':
+            return PROTO_OTI
+        if mode == 'both':
+            src = self.forwarder.active_source
+            return src if src in (PROTO_FREED, PROTO_OTI) else PROTO_FREED
+        return getattr(self, '_active_source', PROTO_FREED)   # auto — follows traffic
+
+    def _listen_plan(self) -> dict:
+        """port -> set of protocols accepted on it, for the current input mode."""
+        f, mode = self.forwarder, self.forwarder.input_mode
+        if mode == 'freed':
+            return {f.listen_port: {PROTO_FREED}}
+        if mode == 'oti':
+            return {f.oti_listen_port: {PROTO_OTI}}
+        if mode == 'auto':
+            return {f.listen_port: {PROTO_FREED, PROTO_OTI}}
+        plan = {}
+        plan.setdefault(f.listen_port, set()).add(PROTO_FREED)
+        plan.setdefault(f.oti_listen_port, set()).add(PROTO_OTI)
+        return plan
+
+    def _ports_str(self) -> str:
+        return ' / '.join(str(p) for p in sorted(self._listen_plan()))
+
+    def _sender_filter(self) -> dict:
+        return {PROTO_FREED: self.forwarder.freed_sender_ip,
+                PROTO_OTI:   self.forwarder.oti_sender_ip}
+
+    def _start_listeners(self):
+        self._stop_listeners()
+        self._listen_errors = {}
+        handlers = {PROTO_FREED: self._on_freed_datagram, PROTO_OTI: self._on_oti_datagram}
+        for port, accept in self._listen_plan().items():
+            lst = UdpListener(port, accept, handlers)
+            lst.ip_filter = self._sender_filter()
             try:
-                self.receiver.socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            except OSError:
-                pass
-            self.receiver.socket.settimeout(1.0)
-            self.receiver.socket.bind(('0.0.0.0', port))
-            self.receiver.running = True
-        except Exception as e:
-            self.lbl_status.setText(f'● ERROR: {e}')
-            self.lbl_status.setStyleSheet(f'color: {self.RED}; background: transparent;')
+                lst.start()
+            except OSError as e:
+                self._listen_errors[port] = str(e)
+                continue
+            self.listeners[port] = lst
+
+    def _stop_listeners(self):
+        for lst in self.listeners.values():
+            lst.stop()
+        self.listeners = {}
+
+    def _restart_listeners(self):
+        self._start_listeners()
+        self.lbl_port.setText(self._ports_str())
+        self._check_relay_loop()
+        self._update_settings_status()
+
+    def _view_state(self) -> FreeDReceiverGUI:
+        """State object behind the Dashboard / Packet Map / Jitter tabs."""
+        return self.oti_state if self._active_source == PROTO_OTI else self.receiver
+
+    def _note_rx(self, proto: str, t: float):
+        self._last_rx[proto] = t
+        if self.forwarder.input_mode == 'auto' and self._active_source != proto:
+            cur = self._last_rx.get(self._active_source)
+            if cur is None or t - cur > 1.0:     # current source silent for 1 s — follow the new one
+                self._active_source = proto
+
+    def _on_freed_datagram(self, data: bytes, addr: tuple, recv_time: float):
+        """Receive thread: FreeD D1 datagram."""
+        self._note_rx(PROTO_FREED, recv_time)
+        r = self.receiver
+        parsed = r.parser.parse(data)
+        if not parsed:
+            return
+        self._sender_labels[addr] = f"FreeD · cam {parsed['camera_id']}"
+        r.display_data(parsed, addr, recv_time=recv_time)
+        if self._active_source == PROTO_FREED:
+            self.forwarder.forward(parsed['raw_bytes'], self.ltc_reader)
+            self._on_parsed_packet(parsed)
+
+    def _on_oti_datagram(self, data: bytes, addr: tuple, recv_time: float):
+        """Receive thread: one OpenTrackIO datagram (possibly one segment of a sample)."""
+        self._note_rx(PROTO_OTI, recv_time)
+        active = self._active_source == PROTO_OTI
+        if active and not self._relay_blocked:
+            self.oti_sender.relay(data)
+        sample = self.oti_parser.feed(data, addr, recv_time)
+        if sample is None:
+            return
+        self._sender_labels[addr] = oti_device_label(sample)
+        pkt = oti_to_freed_packet(sample)
+        # Display copy carries the camera TC in the extended block (bytes 29-32)
+        # so the Dashboard timecode reads from OpenTrackIO; the forwarded
+        # packet stays a plain 29-byte D1 without timecode.
+        tc   = oti_timecode(sample)
+        disp = pkt + bytes(v & 0xFF for v in tc) if tc else pkt
+        s = self.oti_state
+        parsed = s.parser.parse(disp)
+        if parsed is None:
+            return
+        parsed['oti'] = sample
+        s.display_data(parsed, addr, recv_time=recv_time)
+        if active:
+            self.forwarder.forward(pkt, self.ltc_reader, inject_tc=False)
+
+    def _local_ips(self) -> set:
+        if not hasattr(self, '_local_ip_cache'):
+            try:
+                self._local_ip_cache = {
+                    info[4][0] for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)}
+            except Exception:
+                self._local_ip_cache = set()
+        return self._local_ip_cache
+
+    def _check_relay_loop(self):
+        """Pause OTI relay if the OTI output points back at our own OTI listen port."""
+        ip = (self.oti_sender.ip or '').strip()
+        is_local = (ip.startswith('127.') or ip in ('localhost', '0.0.0.0')
+                    or ip.endswith('.255') or ip in self._local_ips())
+        oti_ports = {p for p, acc in self._listen_plan().items() if PROTO_OTI in acc}
+        self._relay_blocked = is_local and self.oti_sender.port in oti_ports
+        lbl = getattr(self, '_oti_relay_warn', None)
+        if lbl is not None:
+            lbl.setVisible(self._relay_blocked)
+
+    # ------------------------------------------------------------------
+    # Header source badge / picker
+    # ------------------------------------------------------------------
+
+    def _update_source_badge(self):
+        src, mode = self._active_source, self.forwarder.input_mode
+        key = (src, mode)
+        if getattr(self, '_badge_key', None) == key:
+            return
+        self._badge_key = key
+        color = self.CYAN if src == PROTO_OTI else self.GREEN
+        text = PROTO_NAMES[src] + ('  ·  AUTO' if mode == 'auto' else '')
+        self.lbl_src_badge.setText(text)
+        self.lbl_src_badge.setStyleSheet(
+            f'color: {color}; background: transparent; border: 1px solid {color};'
+            f' border-radius: 8px; padding: 1px 8px;')
+        self._hdr_src_combo.setVisible(mode == 'both')
+        self._hdr_src_combo.blockSignals(True)
+        self._hdr_src_combo.setCurrentIndex(0 if src == PROTO_FREED else 1)
+        self._hdr_src_combo.blockSignals(False)
+
+    def _on_hdr_source_changed(self, idx: int):
+        proto = self._hdr_src_combo.itemData(idx)
+        if proto not in (PROTO_FREED, PROTO_OTI) or self.forwarder.input_mode != 'both':
+            return
+        self._active_source = proto
+        self.forwarder.active_source = proto
+        self.forwarder.save_config()
+
+    # ------------------------------------------------------------------
+    # Settings › Network
+    # ------------------------------------------------------------------
+
+    def _combo_qss(self) -> str:
+        return f"""
+            QComboBox {{
+                background-color: {self.BG}; color: {self.FG};
+                border: 1px solid {self.BORDER}; border-radius: 6px;
+                padding: 4px 8px; font-family: {_FONT_SANS}; font-size: 12px;
+            }}
+            QComboBox::drop-down {{ border: none; width: 20px; }}
+            QComboBox QAbstractItemView {{
+                background-color: {self.CARD}; color: {self.FG};
+                selection-background-color: {self.CYAN}; selection-color: #000000;
+            }}
+        """
+
+    def _spin_qss(self) -> str:
+        return f"""
+            QSpinBox {{
+                background-color: {self.BG}; color: {self.FG};
+                border: 1px solid {self.BORDER}; border-radius: 6px;
+                padding: 4px 8px; font-family: {_FONT_MONO}; font-size: 13px;
+            }}
+            QSpinBox::up-button, QSpinBox::down-button {{
+                width: 18px; background-color: {self.BORDER}; border-radius: 3px;
+            }}
+        """
+
+    def _build_network_page(self, net_layout: QVBoxLayout):
+        f = self.forwarder
+
+        def _title(text):
+            lbl = QLabel(text)
+            lbl.setFont(QFont(_FONT_SANS, 9, QFont.Weight.Bold))
+            lbl.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+            return lbl
+
+        def _row(label_text):
+            w = QWidget(); w.setStyleSheet('background: transparent;')
+            hl = QHBoxLayout(w); hl.setContentsMargins(0, 0, 0, 0); hl.setSpacing(10)
+            lbl = QLabel(label_text)
+            lbl.setFixedWidth(140)
+            lbl.setFont(QFont(_FONT_SANS, 11))
+            lbl.setStyleSheet(f'color: {self.FG}; background: transparent;')
+            hl.addWidget(lbl)
+            return w, hl, lbl
+
+        def _small(text):
+            lbl = QLabel(text)
+            lbl.setFont(QFont(_FONT_SANS, 9))
+            lbl.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+            return lbl
+
+        # ── Input card ────────────────────────────────────────────────
+        net_frame = QFrame()
+        net_frame.setObjectName('card')
+        net_inner = QVBoxLayout(net_frame)
+        net_inner.setContentsMargins(16, 12, 16, 14)
+        net_inner.setSpacing(10)
+        net_inner.addWidget(_title('INPUT'))
+
+        mode_w, mode_l, _ = _row('Input')
+        self._mode_combo = QComboBox()
+        self._mode_combo.setFixedWidth(230)
+        self._mode_combo.setStyleSheet(self._combo_qss())
+        for label, val in [('FreeD', 'freed'), ('OpenTrackIO', 'oti'),
+                           ('Both  (separate ports)', 'both'), ('Auto-detect', 'auto')]:
+            self._mode_combo.addItem(label, val)
+        self._mode_combo.setCurrentIndex(FreeDForwarder.INPUT_MODES.index(f.input_mode))
+        self._mode_combo.currentIndexChanged.connect(self._on_input_mode_changed)
+        mode_l.addWidget(self._mode_combo)
+        self._mode_hint = _small('')
+        mode_l.addWidget(self._mode_hint, stretch=1)
+        net_inner.addWidget(mode_w)
+
+        self._freed_port_row, fp_l, self._freed_port_lbl = _row('FreeD port')
+        self._freed_port_spin = QSpinBox()
+        self._freed_port_spin.setRange(1024, 65535)
+        self._freed_port_spin.setValue(f.listen_port)
+        self._freed_port_spin.setFixedWidth(100)
+        self._freed_port_spin.setStyleSheet(self._spin_qss())
+        fp_l.addWidget(self._freed_port_spin)
+        fp_l.addWidget(_small('accept from'))
+        self._freed_sender_combo = QComboBox()
+        self._freed_sender_combo.setFixedWidth(230)
+        self._freed_sender_combo.setStyleSheet(self._combo_qss())
+        self._freed_sender_combo.currentIndexChanged.connect(
+            lambda _i: self._on_sender_combo_changed(PROTO_FREED))
+        fp_l.addWidget(self._freed_sender_combo)
+        fp_l.addStretch()
+        net_inner.addWidget(self._freed_port_row)
+
+        self._oti_port_row, op_l, _ = _row('OpenTrackIO port')
+        self._oti_port_spin = QSpinBox()
+        self._oti_port_spin.setRange(1024, 65535)
+        self._oti_port_spin.setValue(f.oti_listen_port)
+        self._oti_port_spin.setFixedWidth(100)
+        self._oti_port_spin.setStyleSheet(self._spin_qss())
+        op_l.addWidget(self._oti_port_spin)
+        op_l.addWidget(_small('accept from'))
+        self._oti_sender_combo = QComboBox()
+        self._oti_sender_combo.setFixedWidth(230)
+        self._oti_sender_combo.setStyleSheet(self._combo_qss())
+        self._oti_sender_combo.currentIndexChanged.connect(
+            lambda _i: self._on_sender_combo_changed(PROTO_OTI))
+        op_l.addWidget(self._oti_sender_combo)
+        op_l.addStretch()
+        net_inner.addWidget(self._oti_port_row)
+
+        apply_w, apply_l, _ = _row('')
+        apply_btn = QPushButton('Apply ports')
+        apply_btn.setFixedWidth(100)
+        apply_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {self.CYAN}; color: #000000;
+                border: none; border-radius: 6px; padding: 5px 14px;
+                font-family: {_FONT_SANS}; font-size: 12px; font-weight: bold;
+            }}
+            QPushButton:hover {{ background-color: #5ac8fa; }}
+            QPushButton:pressed {{ background-color: #0a84ff; }}
+        """)
+        apply_btn.clicked.connect(self._on_apply_ports)
+        apply_l.addWidget(apply_btn)
+        apply_l.addStretch()
+        net_inner.addWidget(apply_w)
+
+        self._settings_status = QLabel('')
+        self._settings_status.setFont(QFont(_FONT_SANS, 10))
+        self._settings_status.setWordWrap(True)
+        net_inner.addWidget(self._settings_status)
+
+        # Wrong-protocol banner
+        self._mismatch_frame = QFrame()
+        self._mismatch_frame.setStyleSheet(
+            f'QFrame {{ background-color: {self.BG}; border: 1px solid {self.ORANGE};'
+            f' border-radius: 8px; }}')
+        mm_l = QHBoxLayout(self._mismatch_frame)
+        mm_l.setContentsMargins(12, 8, 12, 8)
+        self._mismatch_lbl = QLabel('')
+        self._mismatch_lbl.setWordWrap(True)
+        self._mismatch_lbl.setFont(QFont(_FONT_SANS, 10))
+        self._mismatch_lbl.setStyleSheet(f'color: {self.ORANGE}; background: transparent; border: none;')
+        mm_l.addWidget(self._mismatch_lbl, stretch=1)
+        self._mismatch_btn = QPushButton('Switch')
+        self._mismatch_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {self.ORANGE}; color: #000000;
+                border: none; border-radius: 6px; padding: 5px 14px;
+                font-family: {_FONT_SANS}; font-size: 12px; font-weight: bold;
+            }}
+        """)
+        self._mismatch_btn.clicked.connect(self._on_mismatch_switch)
+        mm_l.addWidget(self._mismatch_btn)
+        self._mismatch_frame.setVisible(False)
+        self._mismatch = None
+        net_inner.addWidget(self._mismatch_frame)
+
+        net_layout.addWidget(net_frame)
+
+        # ── Detected senders card ─────────────────────────────────────
+        snd_frame = QFrame()
+        snd_frame.setObjectName('card')
+        snd_inner = QVBoxLayout(snd_frame)
+        snd_inner.setContentsMargins(16, 12, 16, 14)
+        snd_inner.setSpacing(8)
+        snd_inner.addWidget(_title('DETECTED SENDERS'))
+        snd_inner.addWidget(_small('Everything arriving on the listening ports — protocol identified '
+                                   'from the packet header. Rate is samples per second.'))
+        tbl = QTableWidget(0, 7)
+        tbl.setHorizontalHeaderLabels(['Sender', 'Port', 'Protocol', 'Device', 'Rate', 'Last seen', 'Status'])
+        hh = tbl.horizontalHeader()
+        for col, w in enumerate([150, 60, 100, 0, 80, 80, 130]):
+            if col == 3:
+                hh.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
+            else:
+                hh.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
+                tbl.setColumnWidth(col, w)
+        tbl.verticalHeader().setVisible(False)
+        tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        tbl.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        tbl.setMinimumHeight(130)
+        self._senders_table = tbl
+        self._senders_font = QFont(_FONT_MONO, 10)
+        snd_inner.addWidget(tbl)
+        net_layout.addWidget(snd_frame)
+
+        self._sender_combo_keys = {}
+        self._refresh_network_rows()
+        self._update_settings_status()
+
+    def _refresh_network_rows(self):
+        mode = self.forwarder.input_mode
+        self._freed_port_row.setVisible(mode in ('freed', 'both', 'auto'))
+        self._oti_port_row.setVisible(mode in ('oti', 'both'))
+        self._freed_port_lbl.setText('Port (FreeD + OTI)' if mode == 'auto' else 'FreeD port')
+        self._mode_hint.setText({
+            'freed': 'FreeD D1 only',
+            'oti':   'OpenTrackIO only',
+            'both':  'Each protocol on its own port — pick the displayed/output source in the header',
+            'auto':  'One port — follows whichever protocol is arriving',
+        }[mode])
+        self._sender_combo_keys = {}        # force sender combos to rebuild
+        self._update_network_ui()
+
+    def _update_settings_status(self):
+        if not hasattr(self, '_settings_status'):
+            return
+        if self._listen_errors:
+            port, err = next(iter(self._listen_errors.items()))
+            self._settings_status.setText(f'● Cannot listen on port {port}: {err}')
+            self._settings_status.setStyleSheet(f'color: {self.RED}; background: transparent;')
+            return
+        parts = [f"{port} ({' + '.join(PROTO_NAMES[p] for p in sorted(acc))})"
+                 for port, acc in sorted(self._listen_plan().items())]
+        self._settings_status.setText('● Listening on ' + ',  '.join(parts))
+        self._settings_status.setStyleSheet(f'color: {self.GREEN}; background: transparent;')
+
+    def _on_input_mode_changed(self, idx: int):
+        mode = self._mode_combo.itemData(idx)
+        if mode not in FreeDForwarder.INPUT_MODES:
+            return
+        self.forwarder.input_mode = mode
+        self._active_source = self._resolve_active_source()
+        self.forwarder.save_config()
+        self._restart_listeners()
+        self._refresh_network_rows()
+
+    def _on_apply_ports(self):
+        f = self.forwarder
+        freed_port, oti_port = self._freed_port_spin.value(), self._oti_port_spin.value()
+        if (freed_port, oti_port) == (f.listen_port, f.oti_listen_port) and not self._listen_errors:
+            return
+        self._settings_status.setText('● Restarting…')
+        self._settings_status.setStyleSheet(f'color: {self.YELLOW}; background: transparent;')
+        QApplication.processEvents()
+        f.listen_port, f.oti_listen_port = freed_port, oti_port
+        f.save_config()
+        self._restart_listeners()
+
+    def _on_sender_combo_changed(self, proto: str):
+        combo = self._freed_sender_combo if proto == PROTO_FREED else self._oti_sender_combo
+        ip = combo.currentData() or ''
+        f = self.forwarder
+        if f.input_mode == 'auto':
+            f.freed_sender_ip = f.oti_sender_ip = ip     # one port, one filter
+        elif proto == PROTO_FREED:
+            f.freed_sender_ip = ip
+        else:
+            f.oti_sender_ip = ip
+        f.save_config()
+        flt = self._sender_filter()
+        for lst in self.listeners.values():
+            lst.ip_filter = flt
+        self._sender_combo_keys = {}
+        self._update_network_ui()
+
+    def _on_mismatch_switch(self):
+        if not self._mismatch:
+            return
+        proto, port = self._mismatch
+        f = self.forwarder
+        if f.input_mode in ('freed', 'oti'):
+            f.input_mode = proto
+        if proto == PROTO_OTI:
+            f.oti_listen_port = port
+        else:
+            f.listen_port = port
+        self._active_source = self._resolve_active_source()
+        f.save_config()
+        self._mode_combo.blockSignals(True)
+        self._mode_combo.setCurrentIndex(FreeDForwarder.INPUT_MODES.index(f.input_mode))
+        self._mode_combo.blockSignals(False)
+        self._freed_port_spin.setValue(f.listen_port)
+        self._oti_port_spin.setValue(f.oti_listen_port)
+        self._mismatch = None
+        self._mismatch_frame.setVisible(False)
+        self._restart_listeners()
+        self._refresh_network_rows()
+
+    def _sync_sender_combo(self, combo: QComboBox, protos: set, current_ip: str, senders: list):
+        ips = sorted({s['addr'][0] for s in senders if s['proto'] in protos})
+        key = (tuple(ips), current_ip)
+        if self._sender_combo_keys.get(id(combo)) == key:
+            return
+        self._sender_combo_keys[id(combo)] = key
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem('Any sender', '')
+        for ip in ips:
+            combo.addItem(ip, ip)
+        if current_ip and current_ip not in ips:
+            combo.addItem(f'{current_ip}  (not seen)', current_ip)
+        for i in range(combo.count()):
+            if combo.itemData(i) == current_ip:
+                combo.setCurrentIndex(i)
+                break
+        combo.blockSignals(False)
+
+    def _update_network_ui(self):
+        if not hasattr(self, '_senders_table'):
+            return
+        now  = time.perf_counter()
+        f    = self.forwarder
+        plan = self._listen_plan()
+        flt  = self._sender_filter()
+        senders = []
+        for lst in self.listeners.values():
+            senders.extend(lst.senders(now))
+        senders.sort(key=lambda s: (s['port'], s['addr']))
+
+        # Sender pickers
+        if f.input_mode == 'auto':
+            self._sync_sender_combo(self._freed_sender_combo, {PROTO_FREED, PROTO_OTI},
+                                    f.freed_sender_ip, senders)
+        else:
+            self._sync_sender_combo(self._freed_sender_combo, {PROTO_FREED}, f.freed_sender_ip, senders)
+        self._sync_sender_combo(self._oti_sender_combo, {PROTO_OTI}, f.oti_sender_ip, senders)
+
+        # Table
+        tbl = self._senders_table
+        tbl.setRowCount(len(senders))
+        for row, s in enumerate(senders):
+            proto = s['proto']
+            acc   = plan.get(s['port'], set())
+            if proto is None:
+                status, color = 'Unknown data', self.DIM
+            elif proto not in acc:
+                status, color = 'Wrong port', self.ORANGE
+            elif flt.get(proto) and flt[proto] != s['addr'][0]:
+                status, color = 'Ignored (filter)', self.DIM
+            elif s['age'] < 2.0:
+                status, color = 'Receiving', self.GREEN
+            else:
+                status, color = 'Idle', self.DIM
+            cells = [
+                f"{s['addr'][0]}:{s['addr'][1]}",
+                str(s['port']),
+                PROTO_NAMES.get(proto, '?'),
+                self._sender_labels.get(s['addr'], ''),
+                f"{s['rate']:.2f}" if s['rate'] else '---',
+                f"{s['age']:.1f} s ago" if s['age'] >= 1.0 else 'now',
+                status,
+            ]
+            for col, text in enumerate(cells):
+                item = tbl.item(row, col)
+                if item is None:
+                    item = QTableWidgetItem()
+                    item.setFont(self._senders_font)
+                    tbl.setItem(row, col, item)
+                item.setText(text)
+                item.setForeground(QColor(color if col == 6 else self.FG))
+
+        # Wrong-protocol banner (from any listener, last 3 s)
+        mm = None
+        for port, lst in self.listeners.items():
+            if lst.mismatch and now - lst.mismatch[2] < 3.0:
+                mm = (lst.mismatch[0], port, lst.mismatch[1])
+                break
+        if mm is None:
+            self._mismatch = None
+            self._mismatch_frame.setVisible(False)
+        else:
+            proto, port, addr = mm
+            other = PROTO_NAMES[proto]
+            expected = ' + '.join(PROTO_NAMES[p] for p in sorted(plan.get(port, set())))
+            self._mismatch = (proto, port)
+            self._mismatch_lbl.setText(
+                f'{other} is arriving on port {port} from {addr[0]}:{addr[1]}, '
+                f'but this port is set to {expected}.')
+            self._mismatch_btn.setText(f'Use {other} on {port}')
+            self._mismatch_frame.setVisible(True)
+
+    # ------------------------------------------------------------------
+    # OpenTrackIO tab
+    # ------------------------------------------------------------------
+
+    _OTI_CARDS = [
+        ('DEVICE',     ['Camera', 'Camera S/N', 'Sensor', 'Exposure', 'Tracker',
+                        'Tracker S/N', 'Tracker status', 'Lens', 'Lens S/N']),
+        ('TRANSFORM',  ['Transform', 'X', 'Y', 'Z', 'Pan', 'Tilt', 'Roll', 'Chain']),
+        ('LENS',       ['Focal length', 'Focus distance', 'F-stop', 'T-stop', 'Entrance pupil',
+                        'Encoders F/I/Z', 'Raw enc F/I/Z', 'Projection offset', 'Nominal FL']),
+        ('DISTORTION', ['Model', 'Radial', 'Tangential', 'Overscan', 'Distortion offset', 'Other lens']),
+        ('TIMING',     ['Timecode', 'TC rate', 'Sample rate', 'Mode', 'Sequence',
+                        'Genlock', 'Sync source', 'Sync freq']),
+        ('STREAM',     ['Sender', 'Samples', 'Segments', 'Last sample', 'Checksum errors',
+                        'Lost samples', 'Incomplete', 'Decode errors', 'Protocol', 'Source']),
+    ]
+    _OTI_CARD_COLORS = {'DEVICE': 'FG', 'TRANSFORM': 'CYAN', 'LENS': 'YELLOW',
+                        'DISTORTION': 'YELLOW', 'TIMING': 'ORANGE', 'STREAM': 'FG'}
+    _OTI_KNOWN_LENS = {'pinholeFocalLength', 'focusDistance', 'fStop', 'tStop', 'entrancePupilOffset',
+                       'encoders', 'rawEncoders', 'projectionOffset', 'distortion',
+                       'distortionOverscan', 'distortionOffset'}
+
+    def _build_oti_tab(self, parent: QWidget):
+        outer = QVBoxLayout(parent)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        outer.addWidget(scroll)
+        body = QWidget()
+        scroll.setWidget(body)
+        grid = QGridLayout(body)
+        grid.setContentsMargins(10, 10, 10, 10)
+        grid.setSpacing(10)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+
+        self._oti_hdr = QLabel('Waiting for OpenTrackIO…')
+        self._oti_hdr.setFont(QFont(_FONT_SANS, 11, QFont.Weight.Bold))
+        self._oti_hdr.setStyleSheet(f'color: {self.DIM}; background: transparent;')
+        grid.addWidget(self._oti_hdr, 0, 0, 1, 2)
+
+        self._oti_lbl = {}
+        for i, (title, keys) in enumerate(self._OTI_CARDS):
+            w, form = self._card(title)
+            color = getattr(self, self._OTI_CARD_COLORS[title])
+            for key in keys:
+                v = self._val(color, size=10)
+                v.setWordWrap(True)
+                v.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                form.addRow(self._key(key), v)
+                self._oti_lbl[key] = v
+            grid.addWidget(w, 1 + i // 2, i % 2)
+
+        raw_w, raw_form = self._card('RAW JSON  (last sample)')
+        self._oti_json = QTextEdit()
+        self._oti_json.setReadOnly(True)
+        self._oti_json.setMinimumHeight(260)
+        self._oti_json.setFont(QFont(_FONT_MONO, 9))
+        self._oti_json.setStyleSheet(
+            f'QTextEdit {{ background-color: {self.BG}; color: #aaaaaa;'
+            f' border: 1px solid {self.BORDER}; border-radius: 6px; }}')
+        raw_form.addRow(self._oti_json)
+        grid.addWidget(raw_w, 1 + (len(self._OTI_CARDS) + 1) // 2, 0, 1, 2)
+
+    @staticmethod
+    def _fr(r) -> str:
+        """Format an OpenTrackIO rational {num, denom}."""
+        if isinstance(r, dict) and r.get('denom'):
+            return f"{r['num']}/{r['denom']}  ({r['num'] / r['denom']:.3f})"
+        return '---' if r is None else str(r)
+
+    @staticmethod
+    def _fn(v, fmt: str = '{:.4f}', unit: str = '') -> str:
+        if isinstance(v, bool) or v is None:
+            return '---' if v is None else str(v)
+        if isinstance(v, (int, float)):
+            return fmt.format(v) + unit
+        return str(v)
+
+    @staticmethod
+    def _join(*parts) -> str:
+        return '  ·  '.join(str(p) for p in parts if p not in (None, '')) or '---'
+
+    def _update_oti_tab(self, full: bool = False):
+        s    = self.oti_state
+        data = s.latest_data
+        f    = self.forwarder
+        if data is None:
+            if f.input_mode == 'freed':
+                self._oti_hdr.setText('OpenTrackIO input is off — choose OpenTrackIO, Both or '
+                                      'Auto-detect in Settings › Network')
+            else:
+                port = f.listen_port if f.input_mode == 'auto' else f.oti_listen_port
+                self._oti_hdr.setText(f'Waiting for OpenTrackIO on port {port}…')
             return
 
-        self.receiver.on_packet = lambda raw: self.forwarder.forward(raw, self.ltc_reader)
-        self.receiver.on_packet_parsed = self._on_parsed_packet
-        self.recv_thread = threading.Thread(
-            target=self.receiver.receive_loop,
-            daemon=True,
-            name='FreeDReceiveLoop',
-        )
-        self.recv_thread.start()
+        smp  = data['oti']
+        addr = s.latest_addr
+        now  = time.perf_counter()
+        stale = s._last_packet_time is not None and now - s._last_packet_time > 2.0
+        if stale:
+            self._oti_hdr.setText(f'● TIMEOUT — last sample from {oti_device_label(smp)}')
+            self._oti_hdr.setStyleSheet(f'color: {self.RED}; background: transparent;')
+        else:
+            where = f'  @  {addr[0]}:{addr[1]}' if addr else ''
+            shown = '' if self._active_source == PROTO_OTI else '   (not the active source)'
+            self._oti_hdr.setText(f'● LIVE  {oti_device_label(smp)}{where}{shown}')
+            self._oti_hdr.setStyleSheet(f'color: {self.GREEN}; background: transparent;')
 
-    def _restart_receiver(self, port: int):
-        # Stop existing receiver
-        if self.receiver:
-            self.receiver.running = False
-            try:
-                self.receiver.socket.close()
-            except Exception:
-                pass
-        if self.recv_thread and self.recv_thread.is_alive():
-            self.recv_thread.join(timeout=2.0)
+        fn, fr, jn = self._fn, self._fr, self._join
+        st   = smp.get('static') or {}
+        cam  = st.get('camera') or {}
+        strk = st.get('tracker') or {}
+        slen = st.get('lens') or {}
+        trk  = smp.get('tracker') or {}
+        lens = smp.get('lens') or {}
+        tm   = smp.get('timing') or {}
+        sync = tm.get('synchronization') or {}
+        meta = smp.get('_meta') or {}
+        t    = oti_camera_transform(smp)
+        tr, rot = t.get('translation') or {}, t.get('rotation') or {}
 
-        self._active_port = port
-        self.lbl_port.setText(str(port))
-        self._start_receiver(port)
+        dims = cam.get('activeSensorPhysicalDimensions') or {}
+        res  = cam.get('activeSensorResolution') or {}
+        sensor = jn(f"{fn(dims.get('width'), '{:.3f}')} × {fn(dims.get('height'), '{:.3f}')} mm" if dims else '',
+                    f"{res.get('width')} × {res.get('height')} px" if res else '')
+
+        dist = lens.get('distortion')
+        if isinstance(dist, dict):
+            dist = [dist]
+        d0 = dist[0] if dist else {}
+        model = d0.get('model', '---' if not dist else 'default')
+        if dist and len(dist) > 1:
+            model += f'  (+{len(dist) - 1} more)'
+
+        def _vec(d, keys, fmt='{:.4f}'):
+            d = d or {}
+            return ' / '.join(fn(d.get(k), fmt) for k in keys) if d else '---'
+
+        def _xy(d, unit=''):
+            return f"x {fn(d.get('x'))}  y {fn(d.get('y'))}{unit}" if d else '---'
+
+        tc = tm.get('timecode') or {}
+        if tc:
+            sep = ';' if tc.get('dropFrame') else ':'
+            tc_str = (f"{tc.get('hours', 0):02d}:{tc.get('minutes', 0):02d}:"
+                      f"{tc.get('seconds', 0):02d}{sep}{tc.get('frames', 0):02d}")
+            if tc.get('subFrame'):
+                tc_str += f'.{tc["subFrame"]}'
+        else:
+            tc_str = '---'
+
+        p = self.oti_parser
+        proto = smp.get('protocol') or {}
+        ver = proto.get('version') or []
+        other_lens = sorted(set(lens) - self._OTI_KNOWN_LENS)
+
+        vals = {
+            'Camera':          jn(f"{cam.get('make', '')} {cam.get('model', '')}".strip(), cam.get('label')),
+            'Camera S/N':      jn(cam.get('serialNumber'), 'fw ' + cam['firmwareVersion'] if cam.get('firmwareVersion') else ''),
+            'Sensor':          sensor,
+            'Exposure':        jn('ISO ' + str(cam['isoSpeed']) if 'isoSpeed' in cam else '',
+                                  f"{cam['shutterAngle']}°" if 'shutterAngle' in cam else '',
+                                  fr(cam['captureFrameRate']) + ' fps' if 'captureFrameRate' in cam else ''),
+            'Tracker':         f"{strk.get('make', '')} {strk.get('model', '')}".strip() or '---',
+            'Tracker S/N':     jn(strk.get('serialNumber'), 'fw ' + strk['firmwareVersion'] if strk.get('firmwareVersion') else ''),
+            'Tracker status':  jn(trk.get('status'),
+                                  ('REC' if trk.get('recording') else 'not recording') if 'recording' in trk else '',
+                                  'slate ' + str(trk['slate']) if trk.get('slate') else ''),
+            'Lens':            f"{slen.get('make', '')} {slen.get('model', '')}".strip() or '---',
+            'Lens S/N':        jn(slen.get('serialNumber'), 'fw ' + slen['firmwareVersion'] if slen.get('firmwareVersion') else ''),
+
+            'Transform':       str(t.get('id', '---')),
+            'X':               fn(tr.get('x'), '{:+.5f}', ' m'),
+            'Y':               fn(tr.get('y'), '{:+.5f}', ' m'),
+            'Z':               fn(tr.get('z'), '{:+.5f}', ' m'),
+            'Pan':             fn(rot.get('pan'),  '{:+.4f}', '°'),
+            'Tilt':            fn(rot.get('tilt'), '{:+.4f}', '°'),
+            'Roll':            fn(rot.get('roll'), '{:+.4f}', '°'),
+            'Chain':           ' → '.join(str(x.get('id', '?')) for x in (smp.get('transforms') or [])) or '---',
+
+            'Focal length':    fn(lens.get('pinholeFocalLength'), '{:.3f}', ' mm'),
+            'Focus distance':  fn(lens.get('focusDistance'), '{:.3f}', ' m'),
+            'F-stop':          fn(lens.get('fStop'), '{:.2f}'),
+            'T-stop':          fn(lens.get('tStop'), '{:.2f}'),
+            'Entrance pupil':  fn(lens.get('entrancePupilOffset'), '{:.4f}', ' m'),
+            'Encoders F/I/Z':  _vec(lens.get('encoders'), ('focus', 'iris', 'zoom')),
+            'Raw enc F/I/Z':   _vec(lens.get('rawEncoders'), ('focus', 'iris', 'zoom'), '{}'),
+            'Projection offset': _xy(lens.get('projectionOffset'), ' mm'),
+            'Nominal FL':      fn(slen.get('nominalFocalLength'), '{:.1f}', ' mm'),
+
+            'Model':           model,
+            'Radial':          ', '.join(f'{k:.6g}' for k in d0.get('radial', [])) or '---',
+            'Tangential':      ', '.join(f'{k:.6g}' for k in d0.get('tangential', [])) or '---',
+            'Overscan':        fn(lens.get('distortionOverscan', d0.get('overscan')), '{:.4f}'),
+            'Distortion offset': _xy(lens.get('distortionOffset'), ' mm'),
+            'Other lens':      ', '.join(other_lens) or '---',
+
+            'Timecode':        tc_str,
+            'TC rate':         fr(tc.get('frameRate')) if tc else '---',
+            'Sample rate':     fr(tm.get('sampleRate')),
+            'Mode':            str(tm.get('mode', '---')),
+            'Sequence':        jn(tm.get('sequenceNumber'), f"pkt #{meta.get('seq')}" if 'seq' in meta else ''),
+            'Genlock':         ('LOCKED' if sync.get('locked') else 'UNLOCKED') if sync else '---',
+            'Sync source':     jn(sync.get('source'), ('present' if sync.get('present') else 'absent') if 'present' in sync else ''),
+            'Sync freq':       fr(sync.get('frequency')) if sync.get('frequency') else '---',
+
+            'Sender':          f'{addr[0]}:{addr[1]}' if addr else '---',
+            'Samples':         f'{p.sample_count:,}' + (f'  ({s.packet_fps:.2f}/s)' if s.packet_fps else ''),
+            'Segments':        f'{p.segment_count:,}',
+            'Last sample':     jn(f"{meta.get('payload_size', 0):,} bytes", f"{meta.get('segments', 1)} seg",
+                                  meta.get('encoding')),
+            'Checksum errors': f'{p.checksum_errors:,}',
+            'Lost samples':    f'{p.seq_gaps:,}',
+            'Incomplete':      f'{p.incomplete_count:,}',
+            'Decode errors':   jn(f'{p.decode_errors:,}', p.last_error if p.decode_errors else ''),
+            'Protocol':        jn(proto.get('name'), 'v' + '.'.join(str(v) for v in ver) if ver else ''),
+            'Source':          jn(smp.get('sourceId'), f"#{smp['sourceNumber']}" if 'sourceNumber' in smp else ''),
+        }
+        for key, text in vals.items():
+            self._oti_lbl[key].setText(text)
+
+        gl = self._oti_lbl['Genlock']
+        gl.setStyleSheet(f"color: {self.GREEN if sync.get('locked') else self.RED}; background: transparent;")
+        for key in ('Checksum errors', 'Lost samples', 'Incomplete', 'Decode errors'):
+            bad = not vals[key].startswith('0')
+            self._oti_lbl[key].setStyleSheet(
+                f'color: {self.ORANGE if bad else self.FG}; background: transparent;')
+
+        if full:
+            text = json.dumps({k: v for k, v in smp.items() if k != '_meta'}, indent=2)
+            if text != self._oti_json.toPlainText():
+                bar = self._oti_json.verticalScrollBar()
+                pos = bar.value()
+                self._oti_json.setPlainText(text)
+                bar.setValue(pos)
 
     # ------------------------------------------------------------------
     # Update loop (10 Hz via QTimer)
@@ -1390,6 +2101,14 @@ class FreeDDashboard(QMainWindow):
             except Exception:
                 pass
         self._update_fwd_ui()
+        self._tick = getattr(self, '_tick', 0) + 1
+        try:
+            if self._tabs.currentIndex() == self._oti_tab_index:
+                self._update_oti_tab(full=(self._tick % 5 == 0))
+            if self._tick % 5 == 0:
+                self._update_network_ui()
+        except Exception as e:
+            print(f'[UI] {e}', flush=True)
 
     def _update_fwd_ui(self):
         try:
@@ -1401,17 +2120,19 @@ class FreeDDashboard(QMainWindow):
             pass
 
     def _update(self):
-        if self.receiver is None:
-            return
+        self._update_source_badge()
 
-        if self.recv_thread is not None and not self.recv_thread.is_alive():
-            err = self.receiver._last_error or 'unknown error'
-            self.lbl_status.setText(f'● RX DEAD: {err[:40]}')
+        dead = [(p, l.last_error) for p, l in self.listeners.items() if not l.is_alive()]
+        errs = list(self._listen_errors.items()) + dead
+        if errs:
+            port, err = errs[0]
+            self.lbl_status.setText(f'● RX DEAD :{port}  {(err or "unknown error")[:40]}')
             self.lbl_status.setStyleSheet(f'color: {self.RED}; background: transparent;')
             return
 
-        data = self.receiver.latest_data
-        addr = self.receiver.latest_addr
+        r    = self._view_state()
+        data = r.latest_data
+        addr = r.latest_addr
 
         if data is None:
             if self._cached_ip_str is None:
@@ -1424,12 +2145,11 @@ class FreeDDashboard(QMainWindow):
                     self._cached_ip_str = '  /  '.join(all_ips) if all_ips else '0.0.0.0'
                 except Exception:
                     self._cached_ip_str = '0.0.0.0'
-            self.lbl_status.setText(f'● LISTENING :{self._active_port}  [{self._cached_ip_str}]')
+            self.lbl_status.setText(f'● LISTENING :{self._ports_str()}  [{self._cached_ip_str}]')
             self.lbl_status.setStyleSheet(f'color: {self.CYAN}; background: transparent;')
             return
 
-        r = self.receiver
-        now = time.monotonic()
+        now = time.perf_counter()
         is_stale = (r._last_packet_time is not None) and ((now - r._last_packet_time) > 2.0)
 
         # Rotation
@@ -1534,6 +2254,22 @@ class FreeDDashboard(QMainWindow):
             self.lbl_gl_raw.setText(f'0x{gl_byte26:02X} 0x{gl_byte27:02X}  [{gl_byte26:08b}]')
         self.lbl_gl_ref.setText(f'0x{gl_byte27:02X} (vendor-defined)')
 
+        oti = data.get('oti')
+        if oti is not None:
+            meta  = oti.get('_meta', {})
+            ver   = (oti.get('protocol') or {}).get('version') or []
+            vstr  = 'v' + '.'.join(str(v) for v in ver) if ver else ''
+            self.lbl_proto.setText(f"OpenTrackIO {vstr}  ({meta.get('encoding', '?')})")
+            self.lbl_rawsize.setText(
+                f"{meta.get('payload_size', 0):,} bytes  ·  {meta.get('segments', 1)} segment(s)")
+            hdr = meta.get('header', b'')
+            self.lbl_hex1.setText('HDR ' + ' '.join(f'{b:02X}' for b in hdr))
+            self.lbl_hex2.setText('D1  ' + ' '.join(f'{b:02X}' for b in data['raw_bytes'][:29]))
+            sync = (oti.get('timing') or {}).get('synchronization') or {}
+            if sync:
+                present = 'present' if sync.get('present') else 'absent'
+                self.lbl_gl_ref.setText(f"{sync.get('source', '?')}  ({present})")
+
         # Packet Map
         if hasattr(self, 'packet_table'):
             rb          = data['raw_bytes']
@@ -1595,7 +2331,7 @@ class FreeDDashboard(QMainWindow):
             self._update_jitter_tab()
 
     def _update_jitter_tab(self):
-        r       = self.receiver
+        r       = self._view_state()
         history = list(r._jitter_history)
         n       = len(history)
 
@@ -1715,13 +2451,7 @@ class FreeDDashboard(QMainWindow):
                 pass
         self.forwarder.close()
         self.oti_sender.close()
-        if self.receiver:
-            self.receiver.running = False
-            if self.receiver.socket:
-                try:
-                    self.receiver.socket.close()
-                except Exception:
-                    pass
+        self._stop_listeners()
         event.accept()
 
 

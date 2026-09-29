@@ -22,6 +22,10 @@ class FreeDForwarder:
     """
 
     FPS_OPTIONS = [23.976, 24.0, 25.0, 29.97, 30.0, 48.0, 50.0, 60.0]
+    # Input modes: 'freed' / 'oti' listen for one protocol, 'both' listens for
+    # each on its own port, 'auto' accepts either on the FreeD port and follows
+    # whichever is arriving.
+    INPUT_MODES = ('freed', 'oti', 'both', 'auto')
 
     def __init__(self, config_path: str = _CONFIG_PATH):
         self._config_path      = config_path
@@ -46,12 +50,12 @@ class FreeDForwarder:
 
     # ── forwarding ─────────────────────────────────────────────────────────
 
-    def forward(self, raw: bytes, ltc_reader=None):
+    def forward(self, raw: bytes, ltc_reader=None, inject_tc: bool = True):
         """Called from the receive thread on every valid packet."""
         if self._sock is None:
             return
         buf = bytearray(raw)
-        if self.tc_inject and len(buf) == 29:
+        if inject_tc and self.tc_inject and len(buf) == 29:
             buf = self._inject_tc(buf, ltc_reader)
         payload = bytes(buf)
         with self._lock:
@@ -121,6 +125,11 @@ class FreeDForwarder:
                     'oti_subject':     self.oti_subject,
                     'oti_source_id':   self.oti_source_id,
                     'listen_port':     self.listen_port,
+                    'input_mode':      self.input_mode,
+                    'oti_listen_port': self.oti_listen_port,
+                    'active_source':   self.active_source,
+                    'freed_sender_ip': self.freed_sender_ip,
+                    'oti_sender_ip':   self.oti_sender_ip,
                 }
             with open(self._config_path, 'w') as fh:
                 json.dump(data, fh, indent=2)
@@ -148,6 +157,13 @@ class FreeDForwarder:
                 self.oti_subject   = data.get('oti_subject', 'Camera')
                 self.oti_source_id = data.get('oti_source_id') or str(uuid.uuid4())
                 self.listen_port   = int(data.get('listen_port', 45000))
+                self.input_mode    = data.get('input_mode', 'freed')
+                if self.input_mode not in self.INPUT_MODES:
+                    self.input_mode = 'freed'
+                self.oti_listen_port = int(data.get('oti_listen_port', 45000))
+                self.active_source   = data.get('active_source', 'freed')
+                self.freed_sender_ip = data.get('freed_sender_ip', '')
+                self.oti_sender_ip   = data.get('oti_sender_ip', '')
         except Exception:
             self.destinations  = [
                 dict(self._PERMANENT),
@@ -164,6 +180,11 @@ class FreeDForwarder:
             self.oti_subject   = 'Camera'
             self.oti_source_id = str(uuid.uuid4())
             self.listen_port   = 45000
+            self.input_mode      = 'freed'
+            self.oti_listen_port = 45000
+            self.active_source   = 'freed'
+            self.freed_sender_ip = ''
+            self.oti_sender_ip   = ''
 
     def close(self):
         if self._sock:

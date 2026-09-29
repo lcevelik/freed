@@ -1,0 +1,129 @@
+{
+  "static": {
+    "camera": {
+      "captureFrameRate": {
+        "num": 24,
+        "denom": 1
+      },
+      "activeSensorPhysicalDimensions": {
+        "height": 18.953,
+        "width": 33.696
+      },
+      "make": "Sony",
+      "model": "MPC-3628",
+      "serialNumber": "0003068",
+      "firmwareVersion": "4.00",
+      "isoSpeed": 3200,
+      "shutterAngle": 180.0,
+      "label": "ASR-CT1: A"
+    },
+    "lens": {
+      "make": "N/A",
+      "model": "N/A",
+      "serialNumber": "F08000183",
+      "firmwareVersion": "N/A",
+      "nominalFocalLength": 0.0
+    },
+    "tracker": {
+      "make": "Sony",
+      "model": "ASR-CT1",
+      "serialNumber": "1020016",
+      "firmwareVersion": "V2.00"
+    }
+  },
+  "tracker": {
+    "status": "Good",
+    "recording": false,
+    "slate": "N/A"
+  },
+  "timing": {
+    "sampleRate": {
+      "num": 24,
+      "denom": 1
+    },
+    "timecode": {
+      "hours": 12,
+      "minutes": 52,
+      "seconds": 46,
+      "frames": 12,
+      "frameRate": {
+        "num": 24000,
+        "denom": 1000
+      },
+      "subFrame": 0,
+      "dropFrame": false
+    },
+    "sequenceNumber": 8274673,
+    "synchronization": {
+      "locked": true,
+      "source": "videoIn",
+      "present": true,
+      "frequency": {
+        "num": 24,
+        "denom": 1
+      }
+    }
+  },
+  "lens": {
+    "distortion": [
+      {
+        "model": "Brown-Conrady U-D",
+        "radial": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "tangential": [
+          0.0,
+          0.0
+        ]
+      }
+    ],
+    "entrancePupilOffset": 0.0,
+    "fStop": 2.8847423,
+    "pinholeFocalLength": 40.0,
+    "focusDistance": 4095.0,
+    "rawEncoders": {
+      "focus": 2360,
+      "iris": 0,
+      "zoom": 17432
+    },
+    "projectionOffset": {
+      "x": 0.0,
+      "y": 0.0
+    },
+    "encoders": {
+      "focus": 1.0,
+      "iris": 0.0,
+      "zoom": 0.26599526
+    }
+  },
+  "protocol": {
+    "name": "OpenTrackIO",
+    "version": [
+      1,
+      0,
+      1
+    ]
+  },
+  "sourceNumber": 1,
+  "sampleId": "urn:uuid:2dc32082-01cd-4569-99b8-1c7569afd855",
+  "transforms": [
+    {
+      "translation": {
+        "x": 0.96944684,
+        "y": -1.3831329,
+        "z": 1.3228793
+      },
+      "rotation": {
+        "pan": 2.1233294,
+        "tilt": 3.1307316,
+        "roll": 0.4527985
+      },
+      "id": "camera"
+    }
+  ]
+}

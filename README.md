@@ -1,6 +1,6 @@
 # FreeD Dashboard
 
-A PyQt6 dark-theme GUI application for receiving, parsing, and analysing camera tracking data from the **FreeD (D1) protocol** over UDP.
+A PyQt6 dark-theme GUI application for receiving, parsing, and analysing camera tracking data from the **FreeD (D1)** and **OpenTrackIO** protocols over UDP.
 
 ![Version](https://img.shields.io/badge/version-v2.0.0-orange) ![Python](https://img.shields.io/badge/Python-3.8%2B-blue) ![PyQt6](https://img.shields.io/badge/PyQt6-6.x-green) ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
 
@@ -9,11 +9,15 @@ A PyQt6 dark-theme GUI application for receiving, parsing, and analysing camera 
 ## Features
 
 - Real-time FreeD D1 packet reception over UDP
-- Apple-dark PyQt6 GUI with four tabs:
-  - **Dashboard** — live rotation, position, lens, genlock, timecode, and status
+- **OpenTrackIO input** (e.g. Sony Ocellus) — segmented messages reassembled, checksum-verified, lens / distortion / timing / device metadata decoded
+- Input mode: **FreeD**, **OpenTrackIO**, **Both** (separate ports) or **Auto-detect** — every datagram is identified from its header
+- Detected-senders table with optional lock to one sender IP; wrong-protocol-on-port warning with one-click switch
+- Apple-dark PyQt6 GUI with five tabs:
+  - **Dashboard** — live rotation, position, lens, genlock, timecode, and status (follows the active source)
   - **Packet Map** — byte-by-byte protocol breakdown with decoded values
   - **Jitter** — timing health banner, numeric noise monitoring, genlock health, and full reference guide
-  - **Settings** — configure UDP port, destinations, frame rate, timecode source, and OpenTrackIO output
+  - **OpenTrackIO** — device, transform, lens, distortion, timing, stream statistics and raw JSON
+  - **Settings** — configure input, destinations, frame rate, timecode source, and OpenTrackIO output
 - Correct checksum validation — device-verified formula `(byte26 + byte27 + byte28) & 0xFF == 0xF6`
 - Parses 29-byte FreeD D1 packets with unit conversion (degrees, meters, mm)
 - Timecode from system clock (H:M:S:F) displayed live in the Timing tab and Settings
@@ -43,7 +47,7 @@ pip install PyQt6 numpy
 
 ### Running the portable executable
 
-No dependencies — copy `dist\FreeDReader_v1.9.1.exe` to any Windows machine and run it.
+No dependencies — copy `dist\FreeD_Reader_V2.0.0.exe` to any Windows machine and run it.
 
 ---
 
@@ -126,10 +130,29 @@ Scrollable in-app documentation covering what each metric means, common causes o
 
 ### Settings
 
-- Change the UDP listen port at runtime — hit **Apply** to rebind without restarting
+- **Network** — choose the input mode and ports; hit **Apply ports** to rebind without restarting. The *Detected senders* table lists everything arriving (protocol, device, rate, status); *accept from* locks a protocol to one sender IP
 - Add / remove forwarding destinations (IP + port)
 - Configure timecode frame rate
 - Enable **OpenTrackIO** output with custom IP, port, and subject name
+
+### OpenTrackIO input
+
+| Input mode | Listens on | Active source |
+|------------|-----------|---------------|
+| FreeD (default) | FreeD port | FreeD |
+| OpenTrackIO | OpenTrackIO port | OpenTrackIO |
+| Both | each protocol on its own port (one socket if the ports are equal) | picked in the header |
+| Auto-detect | FreeD port, either protocol | whichever is arriving |
+
+The active source drives the Dashboard, Packet Map, Jitter tab and all outputs:
+
+| Active source | Forwarding destinations | OpenTrackIO output |
+|---------------|------------------------|--------------------|
+| FreeD | FreeD packets (+ TC injection if enabled) | generated from FreeD |
+| OpenTrackIO | converted to 29-byte FreeD D1, **no timecode** | original packets relayed unchanged |
+
+OTI → FreeD conversion uses the same units as FreeD input: zoom = `pinholeFocalLength` mm × 1000, focus = `focusDistance` m × 1000.
+Genlock lock state is carried in the byte-26 phase counter. The relay pauses automatically if the output would loop back into this app's own OpenTrackIO port.
 
 All settings are saved automatically to `%APPDATA%\FreeDReader\freed_forwarder_config.json` and restored on next launch.
 
@@ -164,16 +187,24 @@ Optional 4-byte extension (bytes 29–32): full H:M:S:F timecode block, injected
 
 ```
 freed/
-├── freed_reader.py          # Main GUI application + forwarder
-├── protocol.py              # FreeDParser, FreeDReceiver, FreeDReceiverGUI
-├── opentrackio.py           # OpenTrackIOSender (JSON over UDP, v1.0.1)
-├── freed_simulator.py       # FreeD test packet generator
-├── opentrackio_simulator.py # OpenTrackIO JSON test sender
+├── freed_reader.py              # Main GUI application (FreeDDashboard)
+├── src/
+│   ├── protocol.py              # FreeDParser, FreeDReceiver(GUI), UdpListener, detect_protocol
+│   ├── opentrackio.py           # OpenTrackIOSender + OpenTrackIOParser, OTI → FreeD conversion
+│   ├── forwarder.py             # FreeDForwarder (destinations, TC injection, config)
+│   ├── ltc_reader.py            # BluefishLTCReader
+│   └── ui_utils.py              # Fonts, stdout redirect
+├── simulators/
+│   ├── freed_simulator.py       # FreeD test packet generator
+│   └── opentrackio_simulator.py # OpenTrackIO JSON test sender
 ├── tests/
-│   └── test_freed.py        # 48 unit tests
-├── FreeD_Reader_V1.9.1.spec # PyInstaller build spec
+│   ├── test_freed.py             # FreeD parser / forwarder / OTI output tests
+│   ├── test_opentrackio_input.py # OpenTrackIO input, reassembly, conversion, listener tests
+│   └── data/ocellus_sample.json  # captured Ocellus sample (test fixture)
+├── scripts/                     # launch / build batch files
+├── specs/                       # PyInstaller specs (FreeD_Reader_V2.0.0.spec is current)
 └── dist/
-    └── FreeDReader_v1.9.1.exe  # Standalone executable
+    └── FreeD_Reader_V2.0.0.exe  # Standalone executable
 ```
 
 ---
@@ -182,10 +213,10 @@ freed/
 
 ```bash
 pip install pyinstaller
-pyinstaller FreeD_Reader_V1.9.1.spec
+pyinstaller specs/FreeD_Reader_V2.0.0.spec
 ```
 
-Output: `dist\FreeDReader_v1.9.1.exe` (~50 MB, fully self-contained, no Python required)
+Output: `dist\FreeD_Reader_V2.0.0.exe` (~50 MB, fully self-contained, no Python required)
 
 ---
 
@@ -196,14 +227,17 @@ Output: `dist\FreeDReader_v1.9.1.exe` (~50 MB, fully self-contained, no Python r
 - Check Windows Firewall allows inbound UDP on the configured port
 - Ensure no other app is bound to the same port (close FreeDReader before running diagnostic scripts)
 
-**Wrong port**
-- Open the **Settings** tab, enter the correct port, and click **Apply**
+**Wrong port / wrong protocol**
+- Open **Settings → Network**, enter the correct port, and click **Apply ports**
+- If an orange banner says a protocol is arriving on a port set for the other one, click its button to switch
+- The *Detected senders* table shows every sender reaching the listening ports and why it is (or is not) being used
 
 **Checksum shows MISMATCH**
 - Upgrade to v1.9+ — earlier versions used an incorrect XOR algorithm. v1.9+ uses the correct device-verified formula.
 
 **High jitter (10 ms+)**
 - Windows timer resolution: v1.9 sets 1 ms resolution at startup automatically
+- Readings quantised in ~15.6 ms steps came from `time.monotonic()` (15.6 ms resolution on Windows before Python 3.13); packets are now timestamped with `time.perf_counter()`
 - If jitter persists, it is likely genuine source or network jitter — check the Jitter → Reference tab for diagnosis guidance
 
 **Settings not saving**
@@ -213,6 +247,22 @@ Output: `dist\FreeDReader_v1.9.1.exe` (~50 MB, fully self-contained, no Python r
 ---
 
 ## Changelog
+
+### Unreleased
+
+**New features**
+
+- **OpenTrackIO input** — receive OpenTrackIO v1.0.x (JSON; CBOR if `cbor2` is installed) directly from devices such as the Sony Ocellus ASR-CT1. Segmented messages are reassembled, Fletcher-16 verified, and lost / incomplete samples are counted
+- **Input mode** — FreeD / OpenTrackIO / Both (separate ports) / Auto-detect, with per-datagram protocol detection
+- **Detected senders** table, per-protocol sender lock, and a wrong-protocol warning with one-click switch
+- **OpenTrackIO tab** — device, transform, lens, distortion, timing/genlock, stream statistics, raw JSON
+- **OpenTrackIO → FreeD** — converted 29-byte D1 packets (no timecode) go to the existing forwarding destinations; incoming OpenTrackIO is relayed unchanged to the OpenTrackIO output
+- Header badge shows the active source; source picker in Both mode
+
+**Bug fixes**
+
+- **Jitter measurement resolution** — timestamps used `time.monotonic()`, which only ticks every 15.6 ms on Windows with Python < 3.13, adding up to ~8 ms of false jitter. Now `time.perf_counter()` (sub-microsecond)
+- GUI receive buffer raised from 1024 bytes to 64 KB so large datagrams are never truncated
 
 ### v2.0.0 — 2026-05-12
 
